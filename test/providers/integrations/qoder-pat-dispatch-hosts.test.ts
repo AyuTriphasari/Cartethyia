@@ -55,6 +55,14 @@ function exchangeOk(): Response {
   );
 }
 
+/** The identity behind the job token — what signs the COSY payload. */
+function userinfoOk(): Response {
+  return new Response(JSON.stringify({ id: "user-1", name: "test" }), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+}
+
 function context(fetcher: typeof fetch): ProviderDispatchContext {
   return {
     outbound_fetch: fetcher,
@@ -91,6 +99,10 @@ describe("Qoder PAT dispatch host routing", () => {
         exchanges++;
         return exchangeOk();
       }
+      // The COSY identity is signed with the account id `userinfo` reports for
+      // the job token, so the exchange is followed by one identity read. It is
+      // not a chat call and must not be counted as one.
+      if (url.includes("/api/v1/userinfo")) return userinfoOk();
       chatUrls.push(url);
       return streamOk();
     }) as typeof fetch;
@@ -109,6 +121,7 @@ describe("Qoder PAT dispatch host routing", () => {
     const fetcher = (async (input: unknown, _init?: RequestInit): Promise<Response> => {
       const url = String(input);
       if (url.includes("/api/v1/jobToken/exchange")) return exchangeOk();
+      if (url.includes("/api/v1/userinfo")) return userinfoOk();
       chatUrls.push(url);
       if (url.startsWith("https://api2.qoder.sh")) throw new Error("connection reset");
       return streamOk();
