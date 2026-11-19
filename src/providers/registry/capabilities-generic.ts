@@ -67,4 +67,32 @@ export const GENERIC_SPEC_CAPABILITIES = {
   minimaxcode: anthropicWireProvider("minimaxcode"),
   minimaxcodecn: anthropicWireProvider("minimaxcodecn"),
   umans: anthropicWireProvider("umans"),
+
+  /**
+   * OVHcloud AI Endpoints — public, credential-free chat surface.
+   *
+   * `loadModelDiscovery` passes no `headers` on purpose: the listing is
+   * anonymous, and the shared helper would otherwise stamp an empty
+   * `authorization` header. `joinUrl` collapses the duplicated `/v1` segment
+   * between the base URL and the discovered `/v1/chat/completions` path, so
+   * discovered rows dispatch to the same place the static rows do.
+   */
+  ovhcloud: {
+    endpointPathsByWireFamily: { chat: "/chat/completions" },
+    loadAdapter: async () =>
+      createApiKeyAdapter((await import("../integrations/ovhcloud")).OVHCLOUD_SPEC),
+    loadModels: async () => (await import("../integrations/ovhcloud")).OVHCLOUD_MODELS,
+    loadModelDiscovery: openAIModelDiscovery("ovhcloud"),
+  },
+  /**
+   * AI Horde — volunteer-backed, credential-free chat surface. Same anonymous
+   * listing shape as OVHcloud, so discovery carries no auth header either.
+   */
+  aihorde: {
+    endpointPathsByWireFamily: { chat: "/chat/completions" },
+    loadAdapter: async () =>
+      createApiKeyAdapter((await import("../integrations/aihorde")).AIHORDE_SPEC),
+    loadModels: async () => (await import("../integrations/aihorde")).AIHORDE_MODELS,
+    loadModelDiscovery: openAIModelDiscovery("aihorde"),
+  },
 };

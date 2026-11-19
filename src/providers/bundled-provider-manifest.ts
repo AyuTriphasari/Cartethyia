@@ -126,6 +126,46 @@ const RAW_BUNDLED_PROVIDER_METADATA = [
   },
   { id: "kimi", displayName: "Kimi Code", baseUrl: "https://api.kimi.com/coding", credentialUrl: "https://platform.moonshot.ai/console/api-keys" },
   { id: "opencode", displayName: "OpenCode Free", baseUrl: "https://opencode.ai", requiresAccount: false, ipScopedRateLimit: true, hasAdapterUserAgent: true },
+  {
+    // OVHcloud's public AI Endpoints surface answers anonymous chat requests,
+    // so there is no account to open: the free tier is the credential. The
+    // allowance is per egress address *per model* (measured 2026-11-19: two
+    // requests answer, the third returns 429), which is why this provider
+    // declares `ipScopedRateLimit` — a throttle is the pool's problem, not an
+    // account's. Adding a key raises the ceiling to ~400 RPM and bills per
+    // token; that is why `requiresAccount` is false rather than "no keys
+    // supported", and why the metadata still links the key page.
+    id: "ovhcloud",
+    displayName: "OVHcloud AI Endpoints",
+    baseUrl: "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1",
+    requiresAccount: false,
+    ipScopedRateLimit: true,
+    credentialUrl: "https://endpoints.ai.cloud.ovh.net/",
+    credentialHint:
+      "Optional. Anonymous calls are limited to about 2 requests/minute per IP per model; an OVHcloud AI Endpoints API key raises that to roughly 400 RPM and bills per token.",
+    operatorNotice:
+      "Anonymous allowance is 2 RPM per egress IP per model (HTTP 429 beyond it). Rotate the pool or add a key.",
+  },
+  {
+    // AI Horde routes to volunteer-hosted GPUs behind an [OI]-compatible
+    // surface. No credential is needed for an anonymous request; a registered
+    // key only buys queue priority and kudos, so the provider requires no
+    // account. Limits follow the requesting address for anonymous callers,
+    // hence `ipScopedRateLimit`. The upstream refuses `max_tokens` below 16
+    // instead of raising it — the adapter raises it, and the notice says so
+    // because a caller who asks for 8 tokens would otherwise read that 400 as
+    // our bug.
+    id: "aihorde",
+    displayName: "AI Horde",
+    baseUrl: "https://oai.aihorde.net/v1",
+    requiresAccount: false,
+    ipScopedRateLimit: true,
+    credentialUrl: "https://aihorde.net/register",
+    credentialHint:
+      "Optional. Anonymous requests work with no key; a registered AI Horde key raises queue priority and earns kudos.",
+    operatorNotice:
+      "Volunteer queue: a generation can wait tens of seconds. The upstream accepts max_tokens only between 16 and 16384, so the adapter clamps to that window.",
+  },
   { id: "opencode-zen", displayName: "OpenCode Zen", baseUrl: "https://opencode.ai", hasAdapterUserAgent: true, credentialUrl: "https://opencode.ai/auth" },
   { id: "opencode-go", displayName: "OpenCode Go", baseUrl: "https://opencode.ai", credentialUrl: "https://opencode.ai/auth" },
   { id: "cerebras", displayName: "Cerebras", baseUrl: "https://api.cerebras.ai/v1", credentialUrl: "https://cloud.cerebras.ai/platform" },
