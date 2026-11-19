@@ -22,7 +22,7 @@ import { GatewayError } from "../../../protocol/gateway-error";
 import { mapUpstreamHttpError } from "../../../transport/failure-policy";
 import { getQoderVersion } from "../../operations/client-versions";
 import { qoderMachineOs } from "../../operations/cli-platform";
-import { parseQoderOAuthState } from "./qoder-oauth";
+import { parseQoderOAuthState, qoderOAuthUrls } from "./qoder-oauth";
 import { QODER_REALMS, type QoderRealm } from "./qoder-realm";
 import type { QoderAuth } from "./qoder-types";
 
@@ -114,6 +114,88 @@ export function qoderSessionId(userId: string, modelId: string): string {
 }
 
 type QoderFetcher = (url: string, init: RequestInit) => Promise<Response>;
+
+/** The account identity a job token belongs to, as `userinfo` reports it. */
+interface QoderPatIdentity {
+  readonly userId: string;
+  readonly name: string;
+}
+
+const QODER_IDENTITY_TTL_MS = 6 * 60 * 60 * 1000;
+const QODER_MAX_IDENTITIES = 1_024;
+const qoderPatIdentities = new Map<string, { identity: QoderPatIdentity; expiresAt: number }>();
+
+/**
+ * Reads the real account identity behind a job token.
+ *
+ * The v1 PAT exchange returns a token and nothing else, so a PAT account had
+ * no user id and the COSY identity payload (`cosy-user`, `aid`/`uid`) was
+ * signed with the machine id as a placeholder. That stopped being accepted:
+ * the chat surface answers `403 {"code":"105","message":"Login expired"}` for
+ * every model on a healthy, exchangeable PAT while the same job token reads
+ * `userinfo` with 200. Verified live (2026-11-17) on ten PATs: with the
+ * machine id the stream carries `105`, with the `userinfo` id the same request
+ * reaches the router — so the id, not the token, was the expiry being
+ * reported.
+ *
+ * Cached per PAT for a few hours: the id never changes for a token, and this
+ * must not add a request to every dispatch.
+ */
+async function resolveQoderPatIdentity(args: {
+  readonly pat: string;
+  readonly jobToken: string;
+  readonly fetcher: QoderFetcher;
+  readonly signal: AbortSignal;
+  readonly realm: QoderRealm;
+  readonly version: string;
+}): Promise<QoderPatIdentity | undefined> {
+  const cacheKey = createHash("sha256").update(args.pat).digest("hex");
+  const now = Date.now();
+  const cached = qoderPatIdentities.get(cacheKey);
+  if (cached !== undefined && cached.expiresAt > now) return cached.identity;
+  let identity: QoderPatIdentity | undefined;
+  try {
+    const response = await args.fetcher(qoderOAuthUrls(args.realm).userinfoUrl, {
+      method: "GET",
+      headers: {
+        authorization: `Bearer ${args.jobToken}`,
+        accept: "application/json",
+        "x-request-id": randomUUID().toUpperCase(),
+        "cosy-version": args.version,
+        "cosy-clienttype": "5",
+        "cosy-machineos": qoderMachineOs(),
+        "accept-language": "*",
+        "sec-fetch-mode": "cors",
+        "accept-encoding": "br, gzip, deflate",
+        "user-agent": `qoder/${args.version}`,
+      },
+      signal: args.signal,
+    });
+    if (response.ok) {
+      const body: unknown = await response.json();
+      if (typeof body === "object" && body !== null && !Array.isArray(body)) {
+        const rec = body as Record<string, unknown>;
+        const id = typeof rec["id"] === "string" ? rec["id"] : undefined;
+        const name = typeof rec["name"] === "string" ? rec["name"] : "";
+        if (id !== undefined && id.length > 0) identity = { userId: id, name };
+      }
+    }
+  } catch {
+    identity = undefined;
+  }
+  if (identity === undefined) return undefined;
+  qoderPatIdentities.delete(cacheKey);
+  qoderPatIdentities.set(cacheKey, { identity, expiresAt: now + QODER_IDENTITY_TTL_MS });
+  for (const [candidate, value] of qoderPatIdentities) {
+    if (value.expiresAt <= now) qoderPatIdentities.delete(candidate);
+  }
+  while (qoderPatIdentities.size > QODER_MAX_IDENTITIES) {
+    const oldest = qoderPatIdentities.keys().next();
+    if (oldest.done) break;
+    qoderPatIdentities.delete(oldest.value);
+  }
+  return identity;
+}
 
 /** The fields a PAT→job-token exchange response carries. */
 export interface ExchangeQoderPatResult {
@@ -237,9 +319,20 @@ async function exchangeQoderPat(
   if (result === null) {
     throw new GatewayError("platform_unavailable", 502, "Qoder PAT exchange returned no usable token (request {requestId}). The upstream came back empty-handed — retry 🌙", {}, "upstream");
   }
+  // The COSY identity payload must name the account, not the device. Read the
+  // id `userinfo` reports for this job token; without it the chat surface
+  // answers `105 Login expired` even though the PAT is healthy.
+  const identity = await resolveQoderPatIdentity({
+    pat,
+    jobToken: result.token,
+    fetcher,
+    signal,
+    realm,
+    version,
+  });
   return {
-    userId: machineId,
-    userName: result.name ?? "",
+    userId: identity?.userId ?? machineId,
+    userName: identity?.name ?? result.name ?? "",
     userType: result.userType ?? "personal_standard",
     securityOauthToken: result.token,
     refreshToken: result.refreshToken ?? "",

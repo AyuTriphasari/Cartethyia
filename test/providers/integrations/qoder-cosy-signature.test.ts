@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { expect, test } from "bun:test";
 import { callQoder, qoderSignerFor, transformQoderBody } from "../../../src/providers/integrations/qoder/qoder";
 import type { QoderAuth } from "../../../src/providers/integrations/qoder/qoder";
@@ -39,10 +38,18 @@ test("COSY Bearer payload uses sorted-compact JSON (canonical)", () => {
   expect(typeof payload.requestId).toBe("string");
 });
 
-test("COSY sigpath strips the /algo prefix exactly like upstream", () => {
+test("COSY drops the bodyhash/bodylength/sigpath headers the worker core never sends", () => {
   const url = "https://api1.qoder.sh/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result";
   const headers = qoderSignerFor(AUTH)(url, "body");
-  expect(headers["cosy-sigpath"]).toBe("/api/v2/service/pro/sse/agent_chat_generation");
+  // The path signature is still folded into the md5 chain, but the
+  // worker-core capture (2026-11-17) carries none of these as headers; the
+  // upstream accepts the request without them (verified live: the same
+  // request reaches the router instead of answering `101 Signature invalid`).
+  expect(headers["cosy-sigpath"]).toBeUndefined();
+  expect(headers["cosy-bodyhash"]).toBeUndefined();
+  expect(headers["cosy-bodylength"]).toBeUndefined();
+  expect(headers["cosy-organization-id"]).toBeUndefined();
+  expect(headers["cosy-organization-tags"]).toBeUndefined();
 });
 
 test("COSY headers emit X-Qoder-HTTPDNS-IP only when the auth carries one", () => {
@@ -73,7 +80,7 @@ test("COSY headers mirror the desktop-worker capture (clienttype/business/scene/
   expect(headers["traceparent"]).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/);
 });
 
-test("callQoder sends a zstd-compressed body signed over the scrambled transform", async () => {
+test("callQoder sends the plain scrambled body the Encode=1 surface decodes", async () => {
   const url = "https://api2.qoder.sh/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1";
   let captured: { headers: Headers; body: Uint8Array } | undefined;
   const fetcher = async (_url: string, init: RequestInit) => {
@@ -88,18 +95,13 @@ test("callQoder sends a zstd-compressed body signed over the scrambled transform
   await callQoder(url, payload, "cmodel", AUTH, new AbortController().signal, fetcher);
 
   expect(captured).toBeDefined();
-  expect(captured!.headers.get("content-encoding")).toBe("zstd");
+  // No zstd layer: measured live (2026-11-17) the `Encode=1` surface decodes
+  // the plain scramble and answers `101 Signature invalid` when the body is
+  // compressed, because the signature is verified over the scrambled bytes.
+  expect(captured!.headers.get("content-encoding")).toBeNull();
   const body = captured!.body;
   expect(body).toBeInstanceOf(Uint8Array);
-  // zstd magic: 28 b5 2f fd
-  expect([...body.slice(0, 4)]).toEqual([0x28, 0xb5, 0x2f, 0xfd]);
-
-  // Decompress back to the scrambled transform; the signer hashes/signs the
-  // *scrambled* body (the server decompresses before verifying — proven live
-  // 2026-11-11: signing over the zstd bytes returns `403 Signature invalid`).
-  const decompressed = Bun.zstdDecompressSync(body) as Uint8Array;
+  expect([...body.slice(0, 4)]).not.toEqual([0x28, 0xb5, 0x2f, 0xfd]);
   const expectedScrambled = transformQoderBody(JSON.stringify(payload));
-  expect(Buffer.from(decompressed).equals(Buffer.from(expectedScrambled))).toBe(true);
-  const bodyHash = createHash("md5").update(expectedScrambled).digest("hex");
-  expect(captured!.headers.get("cosy-bodyhash")).toBe(bodyHash);
+  expect(Buffer.from(body).equals(Buffer.from(expectedScrambled))).toBe(true);
 });

@@ -48,23 +48,23 @@ export interface QoderRealmConfig {
 }
 
 /**
- * User agents observed in actual live captures of the real client
- * (2026-11-05, mitmproxy):
- * - CLI / legacy COSY chat + device flow: `Bun/1.4.2` (flow 218/030, v1.1.83)
- * - IDE surface `/model/v1`: `Bun/1.4.4` (flow 219)
- * - job-token exchange: `qoder/<version>` (capture, e.g. `qoder/1.1.83`)
- *
- * The desktop app (0.5.7) hosts an Electron Node worker
- * (`qoder-worker-runtime.obf.mjs --sdk`) whose fetch stack is undici; its
- * chat/worker requests carry `User-Agent: undici` (capture 2026-11-11).
- * The gateway mirrors the app wire on the COSY chat surface, so chat uses
- * `QODER_UA_APP`; the CLI/device-flow surfaces keep `QODER_UA_CLI`.
+ * User agents on the worker-core wire (capture 2026-11-17, 1.1.86-hotfix.5):
+ * every signed call the core sends — chat, poll, region, userinfo — carries
+ * `User-Agent: undici` (Electron-hosted Node fetch), except the
+ * userinfo/exchange family which sends `qoder/<version>`. The `Bun/1.4.2`
+ * UA observed on 2026-11-05 belongs to the separate bun-compiled `qodercli`
+ * binary, not to this wire.
  */
-export const QODER_UA_CLI = "Bun/1.4.2";
-export const QODER_UA_IDE = "Bun/1.4.4";
 export const QODER_UA_APP = "undici";
 
-/** Chat + model-list paths, identical across realms. */
+/** Chat + model-list paths, identical across realms.
+ *
+ * `Encode=1` stays: upstream 2.8.3 moved this to `Encode=*` from a desktop
+ * worker-core capture, but measured live (2026-11-17) against our scramble
+ * transform, `Encode=*` makes the chat surface fail in `EncryptUtil.decode`
+ * (the `*` transform is not the alphabet scramble we emit) while `Encode=1`
+ * with the same scrambled body reaches the router. A path is only "aligned"
+ * when the upstream accepts it. */
 export const QODER_CHAT_PATH =
   "/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1";
 export const QODER_MODELS_PATH = "/algo/api/v2/model/list?Encode=1";
