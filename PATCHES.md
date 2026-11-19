@@ -2,29 +2,41 @@
 
 This repo is a fork of [risunCodex/Cartethyia](https://github.com/risunCodex/Cartethyia)
 (mirrored to `AyuTriphasari/Cartethyia`) with our fixes kept as **ordinary
-commits on `local/patched`**, so an upstream update is a `git merge` — never a
-re-apply of a patch file.
+commits on `local/patched`**, so an upstream update replays our commits instead
+of re-applying a patch file by hand.
 
 ```
 origin    https://github.com/AyuTriphasari/Cartethyia.git   (our fork)
 upstream  https://github.com/risunCodex/Cartethyia.git      (the source)
-main      → tracks upstream
-local/patched → upstream tag + our 10 commits   ← the branch we run
+main      → upstream
+local/patched → v2.8.1 + our 11 commits   ← the branch we run
+.local-upstream-base → the upstream commit the series currently sits on
 ```
+
+Upstream rewrote its history between 2.8.1 and 2.8.4 (`upstream/main` starts at
+"Cartethyia 2.3.0 — Initial stable release" and shares no ancestor with the
+release our patches were written against), so an update is a **rebase onto
+`upstream/main`**, not a merge: a merge of unrelated histories conflicts on
+every file, while a rebase touches only the ~40 files this fork actually
+changes.
 
 ## Updating
 
 ```sh
-./update.sh check     # dry-run merge: lists the files that would conflict
-./update.sh merge     # real merge, conflicts left in the tree
+./update.sh check     # dry-run rebase in a throwaway worktree: which files conflict
+./update.sh update    # real rebase; conflicts left in the tree
 ./update.sh verify    # typecheck + the tests that cover the patches
 ./update.sh restart   # dashboard build + pm2 restart
 ```
 
 Resolve a conflict by keeping upstream's structure and re-stating our intent
-inside it — the commit message below says what the intent is, and the code
-comments at each site say why. After resolving, run `./update.sh verify`
-before restarting.
+inside it — the commit message says what the intent is, and the code comments
+at each site say why. If upstream already fixed the same thing, `git rebase
+--skip` that commit and drop its row below. After resolving, run
+`./update.sh verify` before restarting.
+
+`check` stops at the first conflicting commit (that is how rebase works), so
+expect a second and third pass through it after resolving the first.
 
 ## The patch series
 
@@ -49,6 +61,13 @@ If a row's check already matches upstream, drop that commit on the next merge
 - `node_modules/` is not in git either — `bun install` after a merge.
 - Base of the series: `v2.8.1` (`fcaab9f6`). Upstream had already moved to
   `v2.8.4` with a large transport/provider refactor when this fork was cut, so
-  the first `./update.sh check` is expected to report conflicts; the ones that
-  matter are the files whose *owner* moved (`src/transport/failure-policy.ts`
-  no longer exists upstream).
+  the first `./update.sh check` is expected to report conflicts — and they are
+  the ones that need judgement, not the import-line ones: `src/transport/failure-policy.ts`
+  no longer exists upstream (`mapUpstreamHttpError` moved), `workers/*` were
+  reworked, and upstream *adopted* `Encode=*` for the qoder chat path where our
+  commit keeps `Encode=1` because `Encode=*` failed live in `EncryptUtil.decode`.
+  Porting to 2.8.4 is therefore a staging job: rebase, resolve, then run the
+  provider smoke tests against a copy of the database before restarting prod.
+- The service that is live today still runs from `/root/cartethyia-281`
+  (`pm2 cartethyia`, port 12800). This tree is the maintainable copy; switch
+  `pm2` to it only after `./update.sh verify` is green.
