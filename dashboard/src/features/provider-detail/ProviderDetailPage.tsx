@@ -197,6 +197,8 @@ export default function ProviderDetail(): ReactNode {
   );
 
   const provider = providerQuery.data;
+  // Free rows on these providers rotate upstream, so the detail page refreshes
+  // the catalog on open instead of trusting whatever was cached last boot.
   const autoModelSyncProvider = id === "opencode" || id === "cline";
   const serviceKinds = provider === undefined ? ["llm"] : normalizedServiceKinds(provider);
   const supportedServiceKinds: DashboardServiceKind[] = [];

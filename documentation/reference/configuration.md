@@ -65,6 +65,7 @@ Variables read outside the spec are therefore **not** listed below:
 | `CARTETHYIA_ACCOUNT_RATE_LIMIT_COOLDOWN_MS` | integer | 900000 | 0 – 86400000 |
 | `CARTETHYIA_ACCOUNT_QUOTA_COOLDOWN_MS` | integer | 3600000 | 0 – 86400000 |
 | `CARTETHYIA_ACCOUNT_MODEL_CAPACITY_COOLDOWN_MS` | integer | 120000 | 0 – 86400000 |
+| `CARTETHYIA_ACCOUNT_MODEL_BUSY_COOLDOWN_MS` | integer | 300000 | 0 – 86400000 |
 | `CARTETHYIA_ACCOUNT_TRANSIENT_COOLDOWN_MS` | integer | 30000 | 0 – 86400000 |
 | `CARTETHYIA_ACCOUNT_UNCLASSIFIED_COOLDOWN_MS` | integer | 900000 | 0 – 86400000 |
 | `CARTETHYIA_ACCOUNT_COOLDOWN_ESCALATION_MAX_MS` | integer | 3600000 | 0 – 86400000 |
@@ -78,6 +79,9 @@ Variables read outside the spec are therefore **not** listed below:
 
 | Variable | Kind | Default | Bounds |
 | --- | --- | --- | --- |
+| `CARTETHYIA_PROXY_ROTATION_URL` | string, optional | unset | — |
+| `CARTETHYIA_PROXY_ROTATION_FAMILY` | string | `rotating` | — |
+| `CARTETHYIA_PROXY_ROTATION_INTERVAL_MS` | integer | 600000 | 60000 – 86400000 |
 | `CARTETHYIA_PROXY_MAX_SOCKETS` | integer | 100 | 1 – 100000 |
 | `CARTETHYIA_PROXY_MAX_FREE_SOCKETS` | integer | 20 | 0 – 100000 |
 
@@ -117,6 +121,10 @@ Variables read outside the spec are therefore **not** listed below:
 | `CARTETHYIA_POOL_PROVIDER_RATE_LIMIT_COOLDOWN_MS` | integer | 3600000 | 0 – 86400000 |
 | `CARTETHYIA_ROUTING_STICKY_WARM_MS` | integer | 300000 | 0 – 86400000 |
 | `CARTETHYIA_ROUTING_STICKY_MAX_SESSIONS` | integer | 256 | 1 – 10000 |
+| `CARTETHYIA_RESET_CREDIT_AUTO_CONSUME` | flag | enabled (disabled only when literally `false`) | — |
+| `CARTETHYIA_RESET_CREDIT_WEEKLY_FLOOR_PERCENT` | integer | 1 | 0 – 100 |
+| `CARTETHYIA_RESET_CREDIT_SWEEP_INTERVAL_MS` | integer | 120000 | 30000 – 3600000 |
+| `CARTETHYIA_RESET_CREDIT_RETRY_MS` | integer | 600000 | 60000 – 86400000 |
 | `CARTETHYIA_OAUTH_CALLBACK_PORT` | integer | 59653 | 1024 – 65535 |
 | `CARTETHYIA_ZCODE_AUTO_CLAIM` | string | `false` | — |
 | `CARTETHYIA_OPENCODE_UNAVAILABLE_FREE` | comma-separated list | unset | — |
