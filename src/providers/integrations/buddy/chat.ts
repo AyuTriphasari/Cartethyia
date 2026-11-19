@@ -1318,6 +1318,80 @@ export function finalizeBuddyMessages(
 }
 
 /**
+ * Composes the fixed leading system prompt with the tenant's injected text.
+ *
+ * One owner for both buddy realms: the text must ride AFTER the fixed identity
+ * prompt inside the SAME system turn, framed by the gateway's markers. The
+ * upstream validates the identity prompt as the channel opener, so the fixed
+ * text stays first and byte-identical — and a second `system` turn is not what
+ * the CN wire expects, so it never gets its own message.
+ */
+export function buddySystemPromptWithTenant(
+  basePrompt: string,
+  extraSystemText?: string,
+): string {
+  return extraSystemText === undefined || extraSystemText.length === 0
+    ? basePrompt
+    : `${basePrompt}\n\n${SYSTEM_PROMPT_WRAPPER_PREFIX}\n${extraSystemText}\n${SYSTEM_PROMPT_WRAPPER_SUFFIX}`;
+}
+
+/**
+ * Moves caller-supplied system text into the leading user turn.
+ *
+ * Both CodeBuddy variants own the `system` turn: intl replaces it with the fixed
+ * identity prompt, CN replaces over-long/agent-shaped text with a neutralizer.
+ * Either way the caller's own directive used to vanish — and personas, roleplay
+ * frames and "prompt creating" instructions all live in that turn, so the model
+ * answered off-character. This carries the text over instead, framed by markers,
+ * ahead of the caller's actual question: the wire shape stays what upstream
+ * validates, the directive still reaches the model.
+ */
+export function carryOverSystemTextIntoUserTurn(
+  messages: Array<Record<string, unknown>>,
+  texts: readonly string[],
+  prefix: string,
+  suffix: string,
+): void {
+  if (texts.length === 0) return;
+  const block = `${prefix}\n${texts.join("\n\n")}\n${suffix}`;
+  const userIndex = messages.findIndex(
+    (message) => message !== undefined && message["role"] === "user",
+  );
+  if (userIndex === -1) {
+    messages.push({ role: "user", content: block });
+    return;
+  }
+  const user = messages[userIndex];
+  if (user === undefined) return;
+  const content = user["content"];
+  if (typeof content === "string") {
+    messages[userIndex] = { ...user, content: `${block}\n\n${content}` };
+    return;
+  }
+  if (Array.isArray(content)) {
+    messages[userIndex] = {
+      ...user,
+      content: [{ type: "text", text: `${block}\n\n` }, ...content],
+    };
+  }
+}
+
+/** Plain text of a caller `system`/`developer` turn, trimmed; "" when empty. */
+export function readSystemText(message: Record<string, unknown>): string {
+  const content = message["content"];
+  if (typeof content === "string") return content.trim();
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((part) =>
+      part !== null && typeof part === "object" && "text" in part
+        ? String((part as Record<string, unknown>)["text"] ?? "")
+        : "",
+    )
+    .join("\n")
+    .trim();
+}
+
+/**
  * Applies the buddy-family message envelope in place: drop caller
  * `system`/`developer` turns, install the variant's fixed leading system
  * prompt, rebuild bare string user content as a typed text block, then
@@ -1349,10 +1423,7 @@ export function applyBuddySystemPrompt(
   // the tenant's directive without touching the identity. An override-mode
   // tenant prompt degrades to this wrapped append (the caller decides via
   // `isWrappedInjectionProvider` before passing the text).
-  const effectivePrompt =
-    extraSystemText === undefined || extraSystemText.length === 0
-      ? systemPrompt
-      : `${systemPrompt}\n\n${SYSTEM_PROMPT_WRAPPER_PREFIX}\n${extraSystemText}\n${SYSTEM_PROMPT_WRAPPER_SUFFIX}`;
+  const effectivePrompt = buddySystemPromptWithTenant(systemPrompt, extraSystemText);
   const source = messages.filter(
     (message) => message["role"] !== "system" && message["role"] !== "developer",
   );

@@ -7,7 +7,7 @@ import {
   scrubBuddyChannelIdentityText,
 } from "../../src/providers/integrations/buddy/chat";
 import { CODEBUDDY_SYSTEM_PROMPT } from "../../src/providers/integrations/buddy/codebuddy/index";
-import { codeBuddyCnPrePayload } from "../../src/providers/integrations/buddy/codebuddy/index";
+import { codeBuddyCnPrePayload, codeBuddyIntlPrePayload } from "../../src/providers/integrations/buddy/codebuddy/index";
 import { readBuddyDeviceToken } from "../../src/providers/integrations/buddy/headers";
 import { resolveBuddyDeviceBinding } from "../../src/providers/integrations/buddy/headers";
 import { fetchTencentBillingQuota } from "../../src/providers/integrations/buddy/account";
@@ -675,5 +675,115 @@ describe("Buddy client-identity hardening", () => {
     expect(messages[0]?.["role"]).toBe("system");
     expect(messages[0]?.["content"]).toBe("You are a helpful assistant.");
     expect(messages[0]?.["content"]).not.toContain("CodeBuddy Code");
+  });
+
+  test("CodeBuddy CN folds the tenant prompt into the single system turn", () => {
+    // Tenant injection reaches the adapter twice: once on the canonical `system`
+    // array and once as `context.tenant_system_prompt`. Leaving both in place
+    // put TWO `system` messages on a wire that expects one. The text belongs
+    // wrapped after the neutral prompt, in the same turn.
+    const tenant = "TENANT-RULE: answer in uppercase only.";
+    const payload: Record<string, unknown> = {
+      model: "m",
+      messages: [
+        { role: "system", content: tenant },
+        { role: "user", content: "hi" },
+      ],
+    };
+    codeBuddyCnPrePayload(payload, cnRequest, cnCandidate, {
+      ...cnContext,
+      tenant_system_prompt: tenant,
+    } as unknown as ProviderDispatchContext);
+    const messages = payload["messages"] as Array<Record<string, unknown>>;
+    const systems = messages.filter((m) => m["role"] === "system");
+    expect(systems.length).toBe(1);
+    expect(String(systems[0]?.["content"])).toContain("You are a helpful assistant.");
+    expect(String(systems[0]?.["content"])).toContain(tenant);
+    expect(
+      messages.some(
+        (m) => String(m["content"]).includes("TENANT-RULE") && m["role"] !== "system",
+      ),
+    ).toBe(false);
+  });
+
+  test("CodeBuddy intl does not deliver the tenant prompt twice", () => {
+    // `applyBuddySystemPrompt` already wraps the tenant text after the identity
+    // prompt; the canonical system array carries the same text. Carrying it into
+    // the user turn as well would state the rule twice.
+    const tenant = "TENANT-RULE: answer in uppercase only.";
+    const payload: Record<string, unknown> = {
+      model: "m",
+      messages: [
+        { role: "system", content: tenant },
+        { role: "user", content: "hi" },
+      ],
+    };
+    codeBuddyIntlPrePayload(payload, cnRequest, cnCandidate, {
+      ...cnContext,
+      tenant_system_prompt: tenant,
+    } as unknown as ProviderDispatchContext);
+    const messages = payload["messages"] as Array<Record<string, unknown>>;
+    expect(messages[0]?.["role"]).toBe("system");
+    expect(String(messages[0]?.["content"])).toContain(tenant);
+    const userTurns = messages.filter((m) => m["role"] === "user");
+    expect(userTurns.every((m) => !String(m["content"]).includes("TENANT-RULE"))).toBe(true);
+  });
+
+  test("CodeBuddy CN carries an over-long caller system prompt into the user turn", () => {
+    // Regression guard: the neutralizer used to *drop* long caller system text,
+    // which destroyed user personas (roleplay/creative directives). The text must
+    // survive — moved into the leading user turn, behind the neutral system turn
+    // that the CN channel validates.
+    const persona = `You are Nyx, a gothic poet. ${"filler sentence. ".repeat(200)}`;
+    const payload: Record<string, unknown> = {
+      model: "m",
+      messages: [
+        { role: "system", content: persona },
+        { role: "user", content: "hello" },
+      ],
+    };
+    codeBuddyCnPrePayload(payload, cnRequest, cnCandidate, cnContext);
+    const messages = payload["messages"] as Array<Record<string, unknown>>;
+    expect(messages[0]?.["role"]).toBe("system");
+    expect(messages[0]?.["content"]).toBe("You are a helpful assistant.");
+    const firstUser = messages.find((message) => message["role"] === "user");
+    const text = JSON.stringify(firstUser?.["content"]);
+    expect(text).toContain("You are Nyx, a gothic poet.");
+    expect(text).toContain("hello");
+    expect(text.indexOf("You are Nyx")).toBeLessThan(text.indexOf("hello"));
+  });
+
+  test("CodeBuddy CN keeps a short caller system prompt verbatim", () => {
+    const payload: Record<string, unknown> = {
+      model: "m",
+      messages: [
+        { role: "system", content: "Always answer in rhyme." },
+        { role: "user", content: "hello" },
+      ],
+    };
+    codeBuddyCnPrePayload(payload, cnRequest, cnCandidate, cnContext);
+    const messages = payload["messages"] as Array<Record<string, unknown>>;
+    expect(messages[0]?.["content"]).toBe("Always answer in rhyme.");
+  });
+
+  test("CodeBuddy intl carries the caller system prompt instead of discarding it", () => {
+    // Regression guard: the intl path replaces the system turn with the fixed
+    // identity prompt; caller personas must survive in the leading user turn.
+    const payload: Record<string, unknown> = {
+      model: "m",
+      messages: [
+        { role: "system", content: "You are Nyx, a gothic poet." },
+        { role: "user", content: "hello" },
+      ],
+    };
+    codeBuddyIntlPrePayload(payload, cnRequest, cnCandidate, cnContext);
+    const messages = payload["messages"] as Array<Record<string, unknown>>;
+    expect(messages[0]?.["role"]).toBe("system");
+    expect(messages[0]?.["content"]).toBe(CODEBUDDY_SYSTEM_PROMPT);
+    const firstUser = messages.find((message) => message["role"] === "user");
+    const text = JSON.stringify(firstUser?.["content"]);
+    expect(text).toContain("You are Nyx, a gothic poet.");
+    expect(text).toContain("hello");
+    expect(text.indexOf("You are Nyx")).toBeLessThan(text.indexOf("hello"));
   });
 });

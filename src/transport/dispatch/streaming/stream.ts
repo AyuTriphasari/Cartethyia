@@ -235,7 +235,10 @@ export async function dispatchStreamingAttempt(input: StreamingDispatchInput): P
       dispatchContext as never,
     );
   const streamOptions = {
-    created: Date.now() / 1000,
+    // Whole seconds: a float here is emitted verbatim into `chat.completion.chunk`
+    // and a strict consumer decoding `created` into int64 rejects the whole chunk
+    // (`json: cannot unmarshal number 1792578256.634 ...`).
+    created: Math.floor(Date.now() / 1000),
     include_usage: canonicalRequest.generation_controls["extension:include_usage"] === true,
   };
   let iterable = createUpstreamIterable();
@@ -260,7 +263,7 @@ export async function dispatchStreamingAttempt(input: StreamingDispatchInput): P
     canonicalRequest.source_surface === "completion"
       ? {
           model: candidate.model_id,
-          created: Date.now() / 1000,
+          created: Math.floor(Date.now() / 1000),
           prompt: canonicalRequest.generation_controls["extension:completion.prompt"],
           echo: canonicalRequest.generation_controls["extension:completion.echo"] === true,
           suffix: canonicalRequest.generation_controls["extension:completion.suffix"],
