@@ -273,6 +273,10 @@ export async function recordAccountFailure(
           interception.providerStated === true,
           streak,
           sourceRuleKind,
+          // A model-saturation window clears with upstream load, not with our
+          // backoff: the classifier marked it `noEscalation`, so the ladder
+          // must not multiply it.
+          interception.noEscalation === true,
         );
     // When a rule replaces the duration, the classifier's `retryAt` (computed
     // from the old constant/fallback) is stale: a shorter rule would lose to it
@@ -305,12 +309,6 @@ export async function recordAccountFailure(
       // A provider-stated deadline wins outright because it is already the later
       // of the two whenever the provider really parked the pair longer.
       const previousDeadline = existing[modelId] === undefined ? undefined : Date.parse(existing[modelId]);
-      const nextDeadline = latestDeadlineMs(
-        retryAtMs,
-        Date.now() + (unsupportedCooldownMs ?? resolvedCooldownMs),
-        previousDeadline,
-      );
-      const nextUntil = new Date(nextDeadline).toISOString();
       const previousUntil = existing[modelId];
       // A re-statement is not an event: what the audit row reports is the
       // *entry* into a cooling episode, and the deadline itself is not a
@@ -324,6 +322,21 @@ export async function recordAccountFailure(
       // the duplicate row.
       const alreadyCooling =
         previousUntil !== undefined && new Date(previousUntil).getTime() > Date.now();
+      // An in-force window is not extended by another report of the same pair.
+      // The retry chain spends its attempts inside one cooling episode — a
+      // single client request that walks three accounts reports each pair once
+      // — and the unsupported-model ladder counts every one of those reports as
+      // a fresh hit, so a model the account simply cannot serve doubled its own
+      // window (6h → 12h) within the same second. Monotonic growth stays: a
+      // provider-stated deadline or a window written while this one had already
+      // lapsed still lands where it belongs.
+      const nextDeadline = alreadyCooling
+        ? (previousDeadline as number)
+        : latestDeadlineMs(
+            retryAtMs,
+            Date.now() + (unsupportedCooldownMs ?? resolvedCooldownMs),
+          );
+      const nextUntil = new Date(nextDeadline).toISOString();
       // `status`/`cooldownUntil` stay untouched: only this (account, model)
       // pair backs off, and the account remains routable for every other model.
       // The error fields ARE written, because they are what provider detail and

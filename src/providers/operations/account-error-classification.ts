@@ -16,6 +16,7 @@ import {
   resolveAccountAuthRejectedCooldownMs,
   resolveAccountCooldownEscalationMaxMs,
   resolveAccountDisabledRecoveryMs,
+  resolveAccountModelBusyCooldownMs,
   resolveAccountModelCapacityCooldownMs,
   resolveAccountPolicyBlockCooldownMs,
   resolveAccountQuotaCooldownMs,
@@ -284,6 +285,17 @@ export interface AccountErrorClassification {
    */
   readonly modelUnsupported?: boolean;
   /**
+   * True when `cooldownMs` is a fixed window that the consecutive-failure
+   * ladder must not multiply.
+   *
+   * The ladder exists to stop the gateway re-dialling an upstream that has just
+   * answered something we do not understand. A model-saturation refusal is the
+   * opposite: the upstream is healthy and merely busy on one model, and it named
+   * "switch models" as the remedy. Doubling that window parked a working model
+   * for up to the escalation ceiling after the upstream had room again.
+   */
+  readonly noEscalation?: boolean;
+  /**
    * This quota verdict closes only the requested model on an otherwise usable
    * account. Kept separate from `category`: quota exhaustion remains the
    * operator-facing cause, while the writer routes it through modelCooldowns.
@@ -336,8 +348,9 @@ export function escalateFallbackCooldown(
   cooldownMs: number,
   providerStated: boolean,
   consecutiveFailures: number,
+  noEscalation = false,
 ): number {
-  if (providerStated || cooldownMs <= 0) return cooldownMs;
+  if (providerStated || noEscalation || cooldownMs <= 0) return cooldownMs;
   const level = Math.min(Math.max(0, consecutiveFailures), COOLDOWN_ESCALATION_MAX_LEVEL);
   return Math.min(cooldownMs * 2 ** level, resolveAccountCooldownEscalationMaxMs());
 }
@@ -357,9 +370,10 @@ export function applyRuleEscalation(
   providerStated: boolean,
   consecutiveFailures: number,
   ruleSource: "provider-rule" | "fallback" | undefined,
+  noEscalation = false,
 ): number {
   if (ruleSource === "provider-rule") return cooldownMs;
-  return escalateFallbackCooldown(cooldownMs, providerStated, consecutiveFailures);
+  return escalateFallbackCooldown(cooldownMs, providerStated, consecutiveFailures, noEscalation);
 }
 
 /**
@@ -457,6 +471,61 @@ function isBuddyAccountBanned(
       if (action.toLowerCase().includes("appeal") || action.toLowerCase().includes("feedback")) {
         return true;
       }
+    }
+  }
+  return false;
+}
+
+/**
+ * Whether the upstream reported the *model* as saturated rather than the account
+ * as rate limited.
+ *
+ * Tencent's buddy family (CodeBuddy/WorkBuddy) answers
+ * `{"code":14003,"msg":"too many requests","displayMsg":{"en":"Model busy.
+ * Please switch models or retry later"},"displayTips":{"en":"This model is
+ * currently saturated. It is not a network issue. Please switch to another
+ * model or wait a moment and retry."},"actions":["SWITCH_MODEL",
+ * "SUBMIT_FEEDBACK","RETRY"]}`.
+ *
+ * Matched on the *wording and the offered remedy*, not on the bare `14003`: the
+ * extracted `message` is only "too many requests", so the code alone is the
+ * same shape as an ordinary per-account rate limit and cooling the account for
+ * it is wrong. `displayTips` even says "it is not a network issue" and names
+ * switching models as the fix — a remedy that only exists if the account's
+ * other models stay routable. That is what makes this model-scoped.
+ */
+function isModelSaturation(lower: string, upstreamBody: unknown): boolean {
+  const phrases = [
+    "model busy",
+    "model is currently saturated",
+    "model currently saturated",
+    "model saturated",
+    "switch models",
+    "switch to another model",
+    "switch to a less busy model",
+  ];
+  if (phrases.some((phrase) => lower.includes(phrase))) return true;
+  const body = isRecord(upstreamBody) ? upstreamBody : undefined;
+  if (body === undefined) return false;
+  for (const field of ["displayMsg", "displayTips", "msg", "message"]) {
+    const value = body[field];
+    const texts =
+      typeof value === "string"
+        ? [value]
+        : isRecord(value)
+          ? Object.values(value).filter((nested): nested is string => typeof nested === "string")
+          : [];
+    for (const text of texts) {
+      const folded = text.toLowerCase();
+      if (phrases.some((phrase) => folded.includes(phrase))) return true;
+    }
+  }
+  // `actions` names the remedy the provider itself offers. `SWITCH_MODEL` can
+  // only be honest advice if the other models on this account still work.
+  const actions = body["actions"];
+  if (Array.isArray(actions)) {
+    for (const action of actions) {
+      if (typeof action === "string" && action.toUpperCase().includes("SWITCH_MODEL")) return true;
     }
   }
   return false;
@@ -644,6 +713,12 @@ interface AccountErrorContext {
    * merely refusing the request.
    */
   readonly buddyBanned: boolean;
+  /**
+   * The upstream named a saturated *model* rather than a throttled account
+   * (buddy `14003`). Computed in the context because the evidence lives in the
+   * response body, which only this layer parses.
+   */
+  readonly modelSaturated: boolean;
   readonly reason: (prefix: string) => string;
   readonly result: (
     category: AccountErrorCategory,
@@ -654,6 +729,7 @@ interface AccountErrorContext {
     mutatesAccount?: boolean,
     modelUnsupported?: boolean,
     modelScoped?: boolean,
+    noEscalation?: boolean,
   ) => AccountErrorClassification;
 }
 
@@ -707,6 +783,20 @@ export interface AccountErrorSignals {
   readonly hostedToolFailure: boolean;
   readonly modelEntitlementFailure: boolean;
   readonly queuedUpstream: boolean;
+  /**
+   * The upstream reported the *model* as saturated rather than the account as
+   * rate limited: Tencent's buddy `14003`
+   * `{"msg":"too many requests","displayMsg":"Model busy. Please switch models
+   * or retry later","displayTips":"This model is currently saturated ...",
+   * "actions":["SWITCH_MODEL",...]}`.
+   *
+   * The distinction decides the blast radius. Read as an ordinary 429 it cooled
+   * the whole account for the 15-minute rate-limit fallback, and the escalation
+   * ladder then doubled that toward the one-hour ceiling on every repeat — so a
+   * single saturated model parked a healthy account for an hour while the
+   * provider had explicitly offered "switch models" as the way to keep working.
+   */
+  readonly modelSaturated: boolean;
   readonly validationRequired: boolean;
   readonly validationUrl: string | undefined;
   /** True when this failure should switch to a sibling account rather than wait. */
@@ -852,10 +942,13 @@ function accountErrorContext(error: unknown, options?: AccountFailureEvidence): 
   const bodyCooldown =
     parseUpstreamBodyReset(options?.upstreamBody) ??
     (rawUpstreamResponse === undefined ? null : parseUpstreamBodyReset(tryParseUpstreamBody(rawUpstreamResponse)));
-  // The body the ban is named in. The caller's parsed body when there is one,
-  // and the raw response text otherwise — the dispatch path stores the
-  // upstream's JSON there, and that is where `displayMsg` lives.
-  const banBody =
+  // The body the ban is named in, and the body a model-saturation refusal is
+  // named in. The caller's parsed body when there is one, and the raw response
+  // text otherwise — the dispatch path stores the upstream's JSON there, and
+  // that is where `displayMsg` and `actions` live. Both verdicts are invisible
+  // in the extracted `message` (`14003` carries only the two words "too many
+  // requests"; the remedy is in `displayMsg`/`actions`).
+  const upstreamErrorBody =
     options?.upstreamBody ??
     (rawUpstreamResponse === undefined ? undefined : tryParseUpstreamBody(rawUpstreamResponse));
   // Whether the provider itself named a window. Decided once, from the
@@ -877,6 +970,7 @@ function accountErrorContext(error: unknown, options?: AccountFailureEvidence): 
     mutatesAccount = canMutate,
     modelUnsupported = false,
     modelScoped = false,
+    noEscalation = false,
   ): AccountErrorClassification => ({
     category,
     status,
@@ -890,6 +984,7 @@ function accountErrorContext(error: unknown, options?: AccountFailureEvidence): 
     // invisible). Defaulting true keeps existing callers conservative.
     routesVisible: true,
     providerStated,
+    ...(noEscalation ? { noEscalation: true } : {}),
     // Usage-limit exhaustion, spending caps, and credential verdicts rotate to a
     // sibling account now; transient throttles (per-minute, capacity) do not.
     // The transient guard also applies to a category the classifier resolved to
@@ -918,7 +1013,8 @@ function accountErrorContext(error: unknown, options?: AccountFailureEvidence): 
     providerId: options?.providerId,
     statedCooldownMs,
     rawUpstreamResponse,
-    buddyBanned: isBuddyAccountBanned(lower, providerCode, banBody),
+    buddyBanned: isBuddyAccountBanned(lower, providerCode, upstreamErrorBody),
+    modelSaturated: isModelSaturation(lower, upstreamErrorBody),
     reason,
     result,
   };
@@ -942,6 +1038,7 @@ export function classifyAccountError(
     rawUpstreamResponse,
     statedCooldownMs,
     buddyBanned,
+    modelSaturated,
     reason,
     result,
   } = accountErrorContext(error, options);
@@ -1085,6 +1182,14 @@ export function classifyAccountError(
       lower.includes("spending cap") ||
       lower.includes("monthly spend limit") ||
       lower.includes("billing daily count exceeded") ||
+      // DeepAI Code's pooled daily free allowance. The body is
+      // `{"code":"machine_bound"}` — "Free daily Theos are not available right
+      // now. Try again at <ISO>". Matched on the code *and* on the wording,
+      // because a stream frame can carry the message without the code. Without
+      // this the 403 fell through to `auth_invalidated`, so a spent allowance
+      // cooled and then disabled keys that were perfectly valid.
+      providerCode === "machine_bound" ||
+      (lower.includes("theos") && lower.includes("not available")) ||
       // Same Qoder family reached by body text when the code is not parsed out.
       (lower.includes("pricingurl") && lower.includes("qoder.com/pricing")));
   // A deterministic content-policy rejection is NOT credential invalidation.
@@ -1312,6 +1417,7 @@ export function classifyAccountError(
     hostedToolFailure,
     modelEntitlementFailure,
     queuedUpstream,
+    modelSaturated,
     validationRequired,
     validationUrl,
     // A quota/spend/cap signal rotates to a sibling account; a per-minute
@@ -1556,6 +1662,14 @@ const ACCOUNT_ERROR_RULES: readonly AccountErrorRule[] = [
           s.lower.includes("included free usage"));
       const buddyCreditsExhausted =
         s.providerCode === "14018" || s.lower.includes("credits exhausted");
+      // DeepAI's daily Theos is a pooled allowance that only *some* models
+      // draw on — the catalog ships 11 zero-Theos rows that keep working while
+      // the balance is spent. Parking the whole account for the ~23 h until the
+      // stated reset would take those healthy models offline with it, so the
+      // window is scoped to the model that was refused (same reasoning as the
+      // Grok free-usage case above).
+      const deepaiDailyTheos =
+        s.providerId === "deepai" && s.providerCode === "machine_bound";
       const cooldownMs = grokFreeTier
         ? (s.statedCooldownMs ?? GROK_QUOTA_COOLDOWN_MS)
         : buddyCreditsExhausted
@@ -1573,12 +1687,52 @@ const ACCOUNT_ERROR_RULES: readonly AccountErrorRule[] = [
         s.reason("Provider quota exhausted"),
         s.origin === "upstream",
         false,
-        grokFreeUsageModelScope && s.modelId !== undefined,
+        (grokFreeUsageModelScope || deepaiDailyTheos) && s.modelId !== undefined,
       );
     },
   },
   ...inceptionRules,
   ...perchRules,
+  {
+    /**
+     * A saturated *model* is not a rate-limited *account*.
+     *
+     * Buddy `14003` extracts to the two words "too many requests", so the
+     * `rate-limit` arm below claimed it and cooled the whole account for the
+     * 15-minute fallback — which the escalation ladder then doubled toward the
+     * one-hour ceiling on every repeat. One busy model parked a healthy account
+     * for an hour while the provider had offered "switch models" as the way to
+     * keep working, and its own `displayTips` said the model, not the network,
+     * was the problem.
+     *
+     * `model_capacity` is what scopes the write to the (account, model) pair
+     * (`recordAccountFailure` writes `modelCooldowns[modelId]` and leaves the
+     * account status alone), so the sibling models keep serving. The window is
+     * the dedicated 5-minute fallback and `noEscalation` keeps the ladder off
+     * it: saturation clears with upstream load, not with our backoff.
+     *
+     * Must precede `rate-limit`, which is broader on the same wording.
+     */
+    name: "model-saturated",
+    match: (s) => s.modelSaturated,
+    decide: (s) => {
+      const cooldownMs = s.statedCooldownMs ?? resolveAccountModelBusyCooldownMs();
+      return s.result(
+        "model_capacity",
+        "cooldown",
+        cooldownMs,
+        new Date(Date.now() + cooldownMs),
+        s.reason("Provider model saturated"),
+        // Provider-scoped evidence still has to reach the writer: a stream frame
+        // carries no credential detail, so `canMutate` is false and the pair
+        // would be retried inside the window the upstream just closed.
+        s.origin === "upstream" && s.scope === "provider",
+        false,
+        false,
+        true,
+      );
+    },
+  },
   {
     name: "rate-limit",
     match: (s) =>
@@ -1690,6 +1844,16 @@ const ACCOUNT_ERROR_RULES: readonly AccountErrorRule[] = [
       // that account down, or it stays `active` and is re-dialled for as long as
       // the block lasts. Provider-scoped 5xx does not: the upstream is
       // indiscriminately failing and no single account is at fault.
+      //
+      // An **abort** is the exception even when the caller scoped it to the
+      // account: it says the exchange was cancelled, not that the account is
+      // unusable. Measured on the Codex pool, `Provider network failure:
+      // aborted` parked a healthy account 45 times in seventeen hours — the
+      // upstream had simply dropped a stream, and the account answered the next
+      // request normally. The row is still written (the cause belongs in the
+      // health log), but nothing is cooled, so the account stays routable for
+      // the retry that actually works.
+      const aborted = /\babort(?:ed|error)?\b/.test(s.lower);
       const transientMs = TRANSIENT_ERROR_COOLDOWN_MS();
       return s.result(
         s.lower.includes("timeout") ? "timeout" : "server_error",
@@ -1697,7 +1861,7 @@ const ACCOUNT_ERROR_RULES: readonly AccountErrorRule[] = [
         transientMs,
         new Date(Date.now() + transientMs),
         s.reason(`Provider ${s.statusCode ?? "network"} failure`),
-        s.canMutate,
+        aborted ? false : s.canMutate,
       );
     },
   },

@@ -51,6 +51,21 @@ export function resolveAccountModelCapacityCooldownMs(): number {
   );
 }
 
+/**
+ * Fallback cooldown for an upstream that reports the *model* as saturated
+ * (default 5m) — Tencent's `14003` "Model busy. Please switch models".
+ *
+ * Distinct from the rate-limit fallback on purpose: the provider is describing
+ * upstream load on one model and naming "switch models" as the remedy, so the
+ * window is short and model-scoped. Fifteen minutes that escalated to the
+ * one-hour ceiling kept a healthy model dark long after the upstream had room.
+ */
+export function resolveAccountModelBusyCooldownMs(): number {
+  return cachedCooldownMs(
+    "CARTETHYIA_ACCOUNT_MODEL_BUSY_COOLDOWN_MS",
+    CONFIG_SPEC.CARTETHYIA_ACCOUNT_MODEL_BUSY_COOLDOWN_MS,
+  );
+}
 /** Backoff for a transient 5xx/network fault, recorded as `cooldown` (default 30s). */
 export function resolveAccountTransientCooldownMs(): number {
   return cachedCooldownMs(
