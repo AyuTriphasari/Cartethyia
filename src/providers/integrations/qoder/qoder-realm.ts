@@ -57,12 +57,17 @@ export interface QoderRealmConfig {
  */
 export const QODER_UA_APP = "undici";
 
-/** Chat + model-list paths, identical across realms. `Encode=*` per the
- * worker-core capture (2026-11-17): the `*` encoding sends the scramble
- * transform only, without the zstd layer `Encode=1` used on 0.5.7. */
+/** Chat + model-list paths, identical across realms.
+ *
+ * `Encode=1` stays: upstream moved this to `Encode=*` from a desktop
+ * worker-core capture, but measured live (2026-11-17) against our scramble
+ * transform, `Encode=*` makes the chat surface fail in `EncryptUtil.decode`
+ * (the `*` transform is not the alphabet scramble we emit) while `Encode=1`
+ * with the same scrambled body reaches the router. A path is only "aligned"
+ * when the upstream accepts it. Re-verify on each upstream sync. */
 export const QODER_CHAT_PATH =
-  "/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=*";
-export const QODER_MODELS_PATH = "/algo/api/v2/model/list?Encode=*";
+  "/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1";
+export const QODER_MODELS_PATH = "/algo/api/v2/model/list?Encode=1";
 
 /** The model-server host for one realm (intl: `api1`, cn: gateway). */
 /**

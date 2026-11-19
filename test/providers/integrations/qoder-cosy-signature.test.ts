@@ -39,11 +39,13 @@ test("COSY Bearer payload uses sorted-compact JSON (canonical)", () => {
   expect(typeof payload.requestId).toBe("string");
 });
 
-test("COSY wire headers the client never sends stay absent (sigpath/bodyhash/bodylength/organization)", () => {
+test("COSY drops the bodyhash/bodylength/sigpath headers the worker core never sends", () => {
   const url = "https://api1.qoder.sh/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result";
   const headers = qoderSignerFor(AUTH)(url, "body");
-  // The worker-core capture (2026-11-17) shows none of these on any signed
-  // surface; the signature itself still covers the stripped /algo path.
+  // The path signature is still folded into the md5 chain, but the
+  // worker-core capture (2026-11-17) carries none of these as headers; the
+  // upstream accepts the request without them (verified live: the same
+  // request reaches the router instead of answering `101 Signature invalid`).
   expect(headers["cosy-sigpath"]).toBeUndefined();
   expect(headers["cosy-bodyhash"]).toBeUndefined();
   expect(headers["cosy-bodylength"]).toBeUndefined();
@@ -89,8 +91,8 @@ test("COSY headers mirror the worker-core capture (app profile and cli profile)"
   }
 });
 
-test("callQoder sends the plain scrambled body (Encode=* wire, no zstd)", async () => {
-  const url = "https://api2.qoder.sh/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=*";
+test("callQoder sends the plain scrambled body the Encode=1 surface decodes", async () => {
+  const url = "https://api2.qoder.sh/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1";
   let captured: { headers: Headers; body: Uint8Array } | undefined;
   const fetcher = async (_url: string, init: RequestInit) => {
     captured = {
@@ -104,12 +106,13 @@ test("callQoder sends the plain scrambled body (Encode=* wire, no zstd)", async 
   await callQoder(url, payload, "cmodel", AUTH, new AbortController().signal, fetcher);
 
   expect(captured).toBeDefined();
-  // Worker-core capture 2026-11-17: with `Encode=*` the wire carries the
-  // scramble transform only — no `Content-Encoding`, no zstd magic.
+  // No zstd layer: measured live (2026-11-17) the `Encode=1` surface decodes
+  // the plain scramble and answers `101 Signature invalid` when the body is
+  // compressed, because the signature is verified over the scrambled bytes.
   expect(captured!.headers.get("content-encoding")).toBeNull();
   const body = captured!.body;
   expect(body).toBeInstanceOf(Uint8Array);
+  expect([...body.slice(0, 4)]).not.toEqual([0x28, 0xb5, 0x2f, 0xfd]);
   const expectedScrambled = transformQoderBody(JSON.stringify(payload));
   expect(Buffer.from(body).equals(Buffer.from(expectedScrambled))).toBe(true);
-  expect(captured!.headers.get("cosy-bodyhash")).toBeNull();
 });
