@@ -16,6 +16,11 @@ import type { CartethyiaDatabase } from "../../persistence/db-handle";
 import { providers } from "../../persistence/schema";
 import type { CompatibilityProfile } from "../provider-metadata";
 import { resolveCustomCliHeaders } from "./custom-cli-headers";
+import {
+  ensureClaudeAgentSystemPrompt,
+  ensureClaudeClientMetadata,
+  claudeSessionId,
+} from "./claude-client-identity";
 import { GATEWAY_USER_AGENT } from "./gateway-user-agent";
 import { isIP } from "node:net";
 import { isAddressAllowed } from "../../network/ssrf";
@@ -343,12 +348,37 @@ export async function registerByokProviders(
           base_url: baseUrl,
           authentication_header_shape: wireProfile.authHeaderShape,
           buildExtraHeaders: (context, _request, candidate) => {
+            const wireFamily = candidate?.wire_family ?? "chat";
+            const cliIdentity = compatibilityProfile?.cli_identity !== false;
+            // A [CC] CLI request carries a per-session id header; relays that
+            // fingerprint CLI traffic expect one, and a stable value keeps the
+            // session correlating across turns instead of looking like a new
+            // client every request.
+            const cliHeaders = (): Record<string, string> => {
+              if (!cliIdentity) return {};
+              const headers = resolveCustomCliHeaders(wireFamily);
+              if (wireFamily === "messages") {
+                headers["x-claude-code-session-id"] = claudeSessionId(
+                  context.credential.account_id ?? providerId,
+                  context.conversation_affinity,
+                );
+              }
+              return headers;
+            };
             // An operator-set route identity wins over both auto modes: Routing
             // Strategy now serves custom providers too, and its value (including
             // the empty "None" choice) must be honored verbatim.
             const routeAgent = context.user_agent;
             if (routeAgent !== undefined) {
+              // A route identity replaces the User-Agent **only**. On the
+              // Anthropic wire the rest of the CLI identity (`x-app: cli`, the
+              // `anthropic-beta` marker, the `x-stainless-*` family) is what a
+              // [CC]-only upstream keys on, so dropping it made an
+              // operator-chosen UA strictly worse than leaving the control
+              // alone. "None" (an empty route agent) therefore falls back to the
+              // CLI identity instead of sending no identity at all.
               return {
+                ...(wireFamily === "messages" ? cliHeaders() : {}),
                 ...(routeAgent.length > 0 ? { "user-agent": routeAgent } : {}),
                 ...(compatibilityProfile?.extra_headers ?? {}),
               };
@@ -363,12 +393,8 @@ export async function registerByokProviders(
                 ...(compatibilityProfile?.extra_headers ?? {}),
               };
             }
-            const sendCli = compatibilityProfile?.cli_identity !== false;
-            const cliHeaders = sendCli
-              ? resolveCustomCliHeaders(candidate?.wire_family ?? "chat")
-              : {};
             return {
-              ...cliHeaders,
+              ...cliHeaders(),
               ...(compatibilityProfile?.extra_headers ?? {}),
             };
           },
@@ -378,6 +404,22 @@ export async function registerByokProviders(
           // Operator paths when declared, otherwise the derived bare-root paths
           // for exactly the wire families this provider serves.
           endpoint_paths_by_wire_family: wireProfile.endpointPathsByWireFamily,
+          // Some Anthropic-compatible groups refuse anything that is not shaped
+          // like the [CC] CLI, and they decide it from `metadata.user_id` — a
+          // JSON *string* carrying both a `device_id` and a `session_id`.
+          // Measured matrix: providers/operations/claude-client-identity.ts.
+          ...(compatibilityProfile?.cli_identity === false
+            ? {}
+            : {
+                prePayload: (payload, _request, candidate, context) => {
+                  if (candidate.wire_family !== "messages") return;
+                  ensureClaudeAgentSystemPrompt(payload);
+                  ensureClaudeClientMetadata(payload, {
+                    account: context.credential.account_id ?? providerId,
+                    conversation: context.conversation_affinity,
+                  });
+                },
+              }),
           ...(compatibilityProfile?.streaming_usage_mode
             ? { streaming_usage_mode: compatibilityProfile.streaming_usage_mode }
             : {}),
