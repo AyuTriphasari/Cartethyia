@@ -831,6 +831,15 @@ const ANTIGRAVITY_SYSTEM_INSTRUCTION =
 const ANTIGRAVITY_FORCED_TOOL_DIRECTIVE =
   "TOOL-ONLY TURN. Call exactly one available tool now. Do not emit any text before or after the call.";
 
+/**
+ * Closing user turn for a transcript that would otherwise end on the model's
+ * own message. Antigravity refuses that shape outright (400 `Requests ending
+ * with a model turn are not supported.`) while Gemini's native API reads it as
+ * prefill, so the gateway states the continuation the prefill implied. Kept
+ * minimal and neutral: it must not add instructions the caller did not ask for.
+ */
+const ANTIGRAVITY_CONTINUE_DIRECTIVE = "Continue from your last message.";
+
 function sessionStateKey(routeIdentity: string, wireModelId: string): string {
   return `${sessionIdentityDigest(routeIdentity)}:antigravity:${wireModelId}`;
 }
@@ -958,23 +967,45 @@ export function buildAntigravityEnvelope(
   const existingContents = Array.isArray(geminiPayload["contents"])
     ? (geminiPayload["contents"] as Record<string, unknown>[])
     : [];
+  // Antigravity rejects a transcript whose last turn is the model's own with
+  // 400 `Requests ending with a model turn are not supported.` A client that
+  // replays history ending on an assistant message (a "continue" or a prefill)
+  // is therefore refused for reasons that have nothing to do with its payload —
+  // the same body ending on a user turn succeeds. Gemini's native API accepts
+  // that shape as prefill, so the restriction is Antigravity's alone and is
+  // closed here rather than in the shared Gemini builder.
+  //
+  // The prefill's intent is "carry on from here", so the transcript is closed
+  // with a user turn that says exactly that instead of dropping the model turn
+  // (which would discard the context the client wanted continued).
+  const lastTurn = existingContents[existingContents.length - 1];
+  const endsWithModelTurn = isRecord(lastTurn) && lastTurn["role"] === "model";
   // Forced choice on Gemini routes: the backend drops `toolConfig` here, so a
   // canonical `tool_choice=required` with no declared change is restated as a
   // trailing user directive (reference behavior). Claude routes implement
   // VALIDATED natively and are left untouched.
-  if (
+  const restateForcedToolChoice =
     !isClaudeRoute &&
     (request.tool_choice === "required" ||
       (typeof request.tool_choice === "object" &&
         request.tool_choice !== null &&
         request.tool_choice.type !== undefined)) &&
-    existingContents.length > 0
-  ) {
+    existingContents.length > 0;
+  if (restateForcedToolChoice) {
     existingContents.push({
       role: "user",
       parts: [{ text: ANTIGRAVITY_FORCED_TOOL_DIRECTIVE }],
     });
     log.info("antigravity: forced tool choice restated for Gemini route", {
+      model: wireModelId,
+    });
+  }
+  if (endsWithModelTurn && !restateForcedToolChoice) {
+    existingContents.push({
+      role: "user",
+      parts: [{ text: ANTIGRAVITY_CONTINUE_DIRECTIVE }],
+    });
+    log.info("antigravity: closed transcript with a user turn for model-ending request", {
       model: wireModelId,
     });
   }
