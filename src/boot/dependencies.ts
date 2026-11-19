@@ -52,6 +52,8 @@ import { ValidatedNetworkBindingFactory } from "../network/egress/factory";
 import { NetworkPoolSelector } from "../network/pool/selector";
 import { restorePoolProbeVerdicts, restoreProviderCooldownMarkers } from "../network/pool/cooldown-store";
 import { ScheduledTaskRegistry } from "../workers/scheduler";
+import { proxyRotationSweep } from "../workers/proxy-rotation";
+import { resetCreditSweep } from "../workers/reset-credit-sweep";
 import { quotaRefreshSweep } from "../workers/quota-refresh-sweep";
 import { registerZcodeGiftClaimTask } from "../workers/zcode-gift-claim";
 import { markProviderApiKeyCredential } from "../console/quota/account-quota-shared";
@@ -79,7 +81,7 @@ import { resolveSsrfPolicy, resolveTrustedProxyBoundary } from "../config/networ
 import type { TrustedProxyBoundary } from "../config/network";
 import { resolveTelemetryRetentionDays } from "../config/telemetry";
 import { resolveConcurrencyTolerance } from "../config/resources";
-import { CONFIG_SPEC, readInt, readList } from "../config/spec";
+import { CONFIG_SPEC, readFlag, readInt, readList, readOptionalText, readText } from "../config/spec";
 import type { ProviderAdapter } from "../providers/provider-contracts";
 import type { ProviderRegistry } from "../providers/provider-registry";
 import type { ByokUpstreamHost } from "../providers/operations/provider-catalog-service";
@@ -725,6 +727,85 @@ export async function buildProductionDeps(): Promise<ProductionDeps> {
     deferWhenBusy: true,
     run: () => syncBuddyUsage(buddyTaskDeps),
   });
+  // Rotating upstream proxy. The vendor sells one address at a time and retires
+  // the previous one, so the projection into `network_pools` is a replace, not
+  // an append — see `workers/proxy-rotation.ts`. Unset URL disables it, which
+  // is the shipped default: a deployment without such a vendor pays nothing.
+  const proxyRotationUrl = readOptionalText(
+    "CARTETHYIA_PROXY_ROTATION_URL",
+    CONFIG_SPEC.CARTETHYIA_PROXY_ROTATION_URL,
+  );
+  if (proxyRotationUrl) {
+    scheduledTasks.register({
+      name: "proxy-rotation",
+      intervalMs: readInt(
+        "CARTETHYIA_PROXY_ROTATION_INTERVAL_MS",
+        CONFIG_SPEC.CARTETHYIA_PROXY_ROTATION_INTERVAL_MS,
+      ),
+      // Shortly after boot rather than one full interval later: a restart would
+      // otherwise leave dispatch on the address the vendor retired while the
+      // process was down.
+      initialDelayMs: 10_000,
+      run: () =>
+        proxyRotationSweep({
+          db,
+          url: proxyRotationUrl,
+          family: readText(
+            "CARTETHYIA_PROXY_ROTATION_FAMILY",
+            CONFIG_SPEC.CARTETHYIA_PROXY_ROTATION_FAMILY,
+          ),
+          snapshotInvalidator: snapshotService,
+        }),
+    });
+  }
+  // Spends a saved rate-limit reset when the weekly window is gone.
+  //
+  // A Codex/Claude account out of weekly allowance is parked until the
+  // provider's own reset time — days away — while the credit granted for
+  // exactly that case expires unused. The redemption itself is the same call
+  // the console's Reset button makes; this only supplies the trigger (weekly
+  // remaining at or below the floor) and the ledger of attempts.
+  //
+  // Reads the quota cache the sweep above keeps warm, so a pass costs no
+  // upstream traffic while nothing is exhausted; only an account actually at
+  // the floor resolves a credential and opens its credit bank.
+  if (
+    readFlag(
+      "CARTETHYIA_RESET_CREDIT_AUTO_CONSUME",
+      CONFIG_SPEC.CARTETHYIA_RESET_CREDIT_AUTO_CONSUME,
+    )
+  ) {
+    scheduledTasks.register({
+      name: "reset-credit-sweep",
+      intervalMs: readInt(
+        "CARTETHYIA_RESET_CREDIT_SWEEP_INTERVAL_MS",
+        CONFIG_SPEC.CARTETHYIA_RESET_CREDIT_SWEEP_INTERVAL_MS,
+      ),
+      // Staggered off the quota refresh it reads from.
+      initialDelayMs: 45_000,
+      run: () =>
+        resetCreditSweep(
+          {
+            db,
+            redis,
+            providerRegistry: registry,
+            resolveCredential: quotaResolveCredential,
+            snapshotInvalidator: snapshotService,
+            markApiKeyCredential: markProviderApiKeyCredential,
+          },
+          {
+            weeklyFloorPercent: readInt(
+              "CARTETHYIA_RESET_CREDIT_WEEKLY_FLOOR_PERCENT",
+              CONFIG_SPEC.CARTETHYIA_RESET_CREDIT_WEEKLY_FLOOR_PERCENT,
+            ),
+            retryMs: readInt(
+              "CARTETHYIA_RESET_CREDIT_RETRY_MS",
+              CONFIG_SPEC.CARTETHYIA_RESET_CREDIT_RETRY_MS,
+            ),
+          },
+        ),
+    });
+  }
   // The scheduled tasks are registered here but started by the caller once the
   // listener is actually serving (`main.ts`). Starting them inside this builder
   // would let the first tick — the lease sweep, the health sweep — run against
