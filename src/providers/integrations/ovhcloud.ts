@@ -65,33 +65,25 @@ export const OVHCLOUD_MODELS: readonly ModelDefinition[] = [
   // DeepSeek V4.1 Flash and both gpt-oss sizes; the remaining rows are marked
   // non-reasoning rather than assumed.
   ovhModel("Qwen3.5-397B-A17B", { ctx: 262_144, reasoning: true }),
-  ovhModel("DeepSeek-V4.1-Flash-1017", { ctx: 1_048_576, reasoning: true }),
-  ovhModel("Qwen3.6-27B", { ctx: 262_144, reasoning: true }),
-  ovhModel("Qwen3.8-27B", { ctx: 262_144, reasoning: true }),
-  ovhModel("Qwen3.5-9B", { ctx: 262_144, reasoning: true }),
-  ovhModel("qwen3.6-35b-a3b", { ctx: 262_144, reasoning: true }),
-  ovhModel("gemma-4-26b-a4b", { ctx: 262_144 }),
+  ovhModel("DeepSeek-V4.1-Flash-1017", { ctx: 1_048_576, vision: true, reasoning: true }),
+  ovhModel("Qwen3.6-27B", { ctx: 262_144, vision: true, reasoning: true }),
+  ovhModel("Qwen3.8-27B", { ctx: 262_144, vision: true, reasoning: true }),
+  ovhModel("Qwen3.5-9B", { ctx: 262_144, vision: true, reasoning: true }),
+  ovhModel("qwen3.6-35b-a3b", { ctx: 262_144, vision: true, reasoning: true }),
+  ovhModel("gemma-4-26b-a4b", { ctx: 262_144, vision: true }),
   ovhModel("nemotron3-nano-30b", { ctx: 262_144, reasoning: true }),
-  ovhModel("nemotron3-omni-30b", { ctx: 131_072, reasoning: true }),
+  ovhModel("nemotron3-omni-30b", { ctx: 131_072, vision: true, reasoning: true }),
   ovhModel("gpt-oss-120b", { ctx: 131_072, reasoning: true }),
   ovhModel("gpt-oss-20b", { ctx: 131_072, reasoning: true }),
   ovhModel("Meta-Llama-3_3-70B-Instruct", { ctx: 131_072 }),
-  ovhModel("Mistral-Small-3.2-24B-Instruct-2506", { ctx: 131_072 }),
+  ovhModel("Mistral-Small-3.2-24B-Instruct-2506", { ctx: 131_072, vision: true }),
   ovhModel("laguna-xs-2.1", { ctx: 131_072 }),
   ovhModel("qwen3-vl-30b-a3b", { ctx: 32_768, vision: true, reasoning: true }),
   ovhModel("Qwen2.5-VL-72B-Instruct", { ctx: 32_768, vision: true }),
-  ovhModel("clef-flash", { ctx: 16_384 }),
   ovhModel("Olala-v1.0-mini-7A1B", { ctx: 32_768 }),
   ovhModel("Olala-v1.0-translate", { ctx: 8_192 }),
   ovhModel("Olala-v1.0-summarise", { ctx: 32_768 }),
-  // `solaria-3` reports `context_length: 0` upstream, i.e. no published
-  // window. Passing `0` would advertise an unusable context, so the row keeps
-  // the catalog's own resolution instead of an invented number.
-  defineModel({
-    id: "solaria-3",
-    providerId: OVHCLOUD_PROVIDER_ID,
-    wireFamily: "chat",
-    endpoint: OVHCLOUD_CHAT_ENDPOINT,
-    out: null,
-  }),
+  // `solaria-3` is advertised by `/v1/models` with `context_length: 0` and
+  // answers 404 `model_not_found` to a real chat dispatch (verified 2026-11-19),
+  // so it is not routable and gets no row. Same for `clef-flash`.
 ];
