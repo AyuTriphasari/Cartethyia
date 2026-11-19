@@ -223,6 +223,21 @@ export const CONFIG_SPEC = {
    * heaviest sweeps here instead of carrying one flag per task.
    */
   CARTETHYIA_DISABLED_TASKS: { kind: "list" },
+  /**
+   * Rotating upstream proxy. The vendor sells one address at a time and retires
+   * the previous one, so the projection into `network_pools` is a replace, not
+   * an append — see `workers/proxy-rotation.ts`. Unset URL disables the task,
+   * which is the shipped default: a deployment without such a vendor pays
+   * nothing. The cadence matches what such vendors sell.
+   */
+  CARTETHYIA_PROXY_ROTATION_URL: { kind: "optional-text" },
+  CARTETHYIA_PROXY_ROTATION_FAMILY: { kind: "text", default: "rotating" },
+  CARTETHYIA_PROXY_ROTATION_INTERVAL_MS: {
+    kind: "int",
+    default: 600_000,
+    min: 60_000,
+    max: 86_400_000,
+  },
 
   /**
    * How long a day's telemetry is kept, in days.
@@ -283,6 +298,25 @@ export const CONFIG_SPEC = {
   CARTETHYIA_ACCOUNT_RATE_LIMIT_COOLDOWN_MS: { kind: "int", default: 900_000, min: 0, max: 86_400_000 },
   CARTETHYIA_ACCOUNT_QUOTA_COOLDOWN_MS: { kind: "int", default: 3_600_000, min: 0, max: 86_400_000 },
   CARTETHYIA_ACCOUNT_MODEL_CAPACITY_COOLDOWN_MS: { kind: "int", default: 120_000, min: 0, max: 86_400_000 },
+  /**
+   * Cooldown for an upstream that reports the *model* as saturated, not the
+   * account as rate limited.
+   *
+   * Tencent's buddy family (CodeBuddy/WorkBuddy) answers
+   * `{"code":14003,"msg":"too many requests","displayMsg":"Model busy. Please
+   * switch models or retry later","displayTips":"This model is currently
+   * saturated ...","actions":["SWITCH_MODEL",...]}`. The provider is naming the
+   * remedy itself — use a different model — which only helps if the sibling
+   * models on the same account stay routable, so this must be a model-scoped
+   * window and never an account-wide one.
+   *
+   * Five minutes, and deliberately *not* escalated by the consecutive-failure
+   * ladder: saturation is a property of the upstream's load, so it clears on its
+   * own far sooner than an account-level backoff. A 15-minute rate-limit
+   * fallback that then doubled up to the one-hour escalation ceiling kept a
+   * healthy model out of rotation long after the upstream had room again.
+   */
+  CARTETHYIA_ACCOUNT_MODEL_BUSY_COOLDOWN_MS: { kind: "int", default: 300_000, min: 0, max: 86_400_000 },
   CARTETHYIA_ACCOUNT_TRANSIENT_COOLDOWN_MS: { kind: "int", default: 30_000, min: 0, max: 86_400_000 },
   /**
    * An unmapped upstream failure cools the account down for 15 minutes.
@@ -338,6 +372,30 @@ export const CONFIG_SPEC = {
    * memory per provider (LRU). Evicted sessions simply lose their preference.
    */
   CARTETHYIA_ROUTING_STICKY_MAX_SESSIONS: { kind: "int", default: 256, min: 1, max: 10_000 },
+
+  /**
+   * Saved rate-limit resets (Codex `/wham/rate-limit-reset-credits`, Claude
+   * Cedar/Juniper grants) are perishable and exist for exactly one situation:
+   * the weekly allowance is gone and the account would otherwise sit parked
+   * until the provider's own reset time, days away.
+   *
+   * The console has always offered the redemption by hand. This sweep is the
+   * same operation on the trigger the provider gives us — the weekly window at
+   * or below the floor — so an operator does not have to watch for it and spend
+   * a credit before it expires unused. The 5-hour window is deliberately not a
+   * trigger: it resets within hours on its own, and a credit spent on it is a
+   * credit wasted.
+   *
+   * `flag`: enabled unless the literal `false` is set, so a deployment that
+   * would rather bank the credits opts out explicitly.
+   */
+  CARTETHYIA_RESET_CREDIT_AUTO_CONSUME: { kind: "flag" },
+  /** Weekly remaining percent that triggers a redemption. */
+  CARTETHYIA_RESET_CREDIT_WEEKLY_FLOOR_PERCENT: { kind: "int", default: 1, min: 0, max: 100 },
+  /** Cadence of the auto-consume sweep. */
+  CARTETHYIA_RESET_CREDIT_SWEEP_INTERVAL_MS: { kind: "int", default: 120_000, min: 30_000, max: 3_600_000 },
+  /** Per-account spacing between two redemption attempts (a refusal must not hot-loop). */
+  CARTETHYIA_RESET_CREDIT_RETRY_MS: { kind: "int", default: 600_000, min: 60_000, max: 86_400_000 },
 
   // Proxy pool agents
   CARTETHYIA_PROXY_MAX_SOCKETS: { kind: "int", default: 100, min: 1, max: 100_000 },
