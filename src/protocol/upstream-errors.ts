@@ -448,6 +448,18 @@ const CAPACITY_ERROR_IDENTIFIERS: ReadonlySet<string> = new Set([
   // InferHub: no live provider could take the request right now.
   "providers_busy",
   "providers_overloaded",
+  // DeepAI Code answers `409 {"type":"session_busy","code":"session_busy"}` with
+  // "Your coding requests are using the available capacity. Waiting for a
+  // slot." — one concurrent coding slot per free account, measured live
+  // 2026-11-19: two parallel requests to the same account always produced one
+  // 200 and one 409, while a sibling account answered 200 in the same second.
+  // Without this entry a 409 fell through the status table to
+  // `upstream_conflict`, which is neither retryable nor account-mutating, so the
+  // buyer received a hard 409 instead of the sibling account's 200 (737 such
+  // rows in 24 h on `deepai/minimax-m3`, every one with a single telemetry row —
+  // no failover was ever attempted). Classifying it as capacity keeps it
+  // retryable and leaves the credential untouched: the slot is busy, not broken.
+  "session_busy",
 ]);
 const AUTH_ERROR_IDENTIFIERS: ReadonlySet<string> = new Set([
   "authentication_error",
@@ -610,6 +622,16 @@ export function classifyUpstreamError(
       origin: "upstream",
       rateLimitScope: "provider",
     };
+  // DeepAI Code spends a pooled daily allowance ("Theos") and answers
+  // `403 {"code":"machine_bound"}` with "Free daily Theos are not available
+  // right now. Try again at <ISO>" once it is spent. That is a quota verdict,
+  // never a credential one: read as an auth failure it carried
+  // `credentialEvidence` and cooled — then disabled — accounts whose keys were
+  // perfectly valid (measured 2026-11-19: one six-request burst flipped eight
+  // healthy accounts to `auth_invalidated`). The message states the reset, so
+  // the account-health layer can park the model until then instead of guessing.
+  if (normalized === "machine_bound")
+    return { code: "quota_exceeded", status: 429, origin: "upstream", rateLimitScope: "provider" };
   // Qoder job-token expiry (`105` / "Login expired") is recoverable by
   // re-exchanging the PAT — never credential evidence (see
   // `QODER_JOB_TOKEN_EXPIRED`).

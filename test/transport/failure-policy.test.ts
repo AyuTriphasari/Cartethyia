@@ -1441,6 +1441,46 @@ describe("classifyUpstreamError", () => {
     });
   });
 
+  /**
+   * DeepAI Code's per-account coding slot.
+   *
+   * Measured live 2026-11-19: two parallel `minimax-m3` requests to one account
+   * always produced one 200 and one
+   * `409 {"type":"session_busy","code":"session_busy"}` ("Your coding requests
+   * are using the available capacity. Waiting for a slot."), while a sibling
+   * account answered 200 in the same second. The status table maps 409 to
+   * `upstream_conflict`, which is not retryable, so the gateway returned the
+   * 409 instead of failing over — 737 times in 24 h, each with a single
+   * telemetry row. The slot is busy, not the credential broken: classify it as
+   * capacity so the attempt loop moves to a sibling account.
+   */
+  test("DeepAI session_busy is capacity: retryable, no account mutation", async () => {
+    const body = {
+      error: {
+        message: "Your coding requests are using the available capacity. Waiting for a slot.",
+        type: "session_busy",
+        code: "session_busy",
+      },
+    };
+    expect(upstreamErrorIdentifier(body)).toBe("session_busy");
+    expect(classifyUpstreamError(409, "session_busy")).toEqual({
+      code: "upstream_overloaded",
+      status: 529,
+      origin: "upstream",
+    });
+
+    const error = await mapUpstreamHttpError(
+      new Response(JSON.stringify(body), { status: 409 }),
+      "deepai",
+    ).catch((thrown: unknown) => thrown);
+    expect(error).toBeInstanceOf(GatewayError);
+    const policy = classifyUpstreamFailure(error);
+    expect(policy.category).toBe("upstream_overloaded");
+    expect(policy.retryable).toBe(true);
+    expect(policy.mutatesAccount).toBe(false);
+    expect(isRetryableFailure(error)).toBe(true);
+  });
+
   test("maps platform identifiers to a 502 unless the status was already a 5xx", () => {
     for (const identifier of [
       "server_error",

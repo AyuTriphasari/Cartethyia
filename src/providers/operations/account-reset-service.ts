@@ -477,7 +477,12 @@ export async function consumeAccountResetCredit(args: {
   readonly credentialRaw: string;
   readonly creditId?: string | undefined;
   readonly fetcher?: typeof fetch | undefined;
-  readonly snapshotInvalidator?: { invalidate(): Promise<number> } | undefined;
+  /**
+   * Route-snapshot invalidator. Typed on the call alone, not the return value:
+   * a redemption changes which accounts routing may pick, and every caller
+   * already owns an invalidator whose result it ignores.
+   */
+  readonly snapshotInvalidator?: { invalidate(): unknown } | undefined;
 }): Promise<ResetConsumeResult> {
   const { db, accountId, providerId, credentialRaw, fetcher = globalThis.fetch } = args;
   const norm = resetProviderId(providerId);
@@ -678,7 +683,7 @@ async function recordResetActivity(
   db: CartethyiaDatabase,
   accountId: string,
   result: ResetConsumeResult,
-  snapshotInvalidator?: { invalidate(): Promise<number> },
+  snapshotInvalidator?: { invalidate(): unknown },
 ): Promise<void> {
   const now = new Date();
   const rows = await db
