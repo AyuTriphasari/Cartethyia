@@ -116,6 +116,16 @@ export function codex429WaitMs(options: {
   const target =
     serverDelayMs ?? (retry === 0 ? CODEX_429_MIN_WAIT_MS * 2 ** retry : null);
   if (target === null) return null;
+  // A window longer than the whole budget cannot clear inside it, so waiting is
+  // not a retry — it is a stall. The usage limit is the case that matters:
+  // `usage_limit_reached` states the reset of the *window* (hours for the
+  // 5-hour one, days for the weekly), and clamping that to the 60-second cap
+  // burned the entire five-minute budget re-posting a request the upstream had
+  // already refused for the rest of the day. The client saw a 429 five minutes
+  // late — long enough for a coding agent to give up mid-flight, which is where
+  // the abort-shaped cooldowns came from. Retire it now instead: the fast error
+  // is the truthful one.
+  if (target > CODEX_429_RETRY_BUDGET_MS) return null;
   const budgetLeft = CODEX_429_RETRY_BUDGET_MS - waitedMs;
   if (budgetLeft <= 0) return null;
   // Leave the pre-dispatch floor for the re-post itself: the retry has to pay

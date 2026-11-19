@@ -27,9 +27,12 @@ import {
 import {
   applyBuddySystemPrompt,
   buddyPrePayloadCommon,
+  buddySystemPromptWithTenant,
+  carryOverSystemTextIntoUserTurn,
   finalizeBuddyMessages,
   injectBuddyParallelToolCalls,
   normalizeBuddyToolNames,
+  readSystemText,
 } from "../chat";
 import {
   BuddyOAuthClient,
@@ -50,7 +53,13 @@ export const CODEBUDDY_BASE_URL = providerBaseUrl("cb");
 
 export const CODEBUDDY_SYSTEM_PROMPT = "You are a helpful assistant.";
 
-function codeBuddyIntlPrePayload(
+// Local patch markers: the caller's own system text is carried into the leading
+// user turn inside these, so the fixed identity prompt can stay the wire opener
+// without the caller's directive being destroyed.
+const CALLER_SYSTEM_CARRY_PREFIX = "<user_instructions>";
+const CALLER_SYSTEM_CARRY_SUFFIX = "</user_instructions>";
+
+export function codeBuddyIntlPrePayload(
   payload: Record<string, unknown>,
   request: CanonicalRequest,
   candidate: ProviderDispatchTarget,
@@ -66,10 +75,37 @@ function codeBuddyIntlPrePayload(
   if (!source) throw new GatewayError("invalid_request", 400, "CodeBuddy model is required (request {requestId}). Check the shape of what you sent — then resend 🪞");
   const messages = payload["messages"];
   if (Array.isArray(messages)) {
+    const list = messages as Array<Record<string, unknown>>;
+    // Local patch: the intl path rebuilds the system turn from the fixed
+    // identity prompt, so the caller's own system directive was discarded.
+    // Carry it into the leading user turn so personas survive (upstream still
+    // validates the identity prompt as the system opener, untouched).
+    //
+    // Tenant injection (Inject System Prompt) already rides AFTER the identity
+    // prompt inside the same system turn via `applyBuddySystemPrompt`, and the
+    // canonical `system` array carries the same text (canonical injection runs
+    // before the adapter). Carrying it again would deliver the tenant rule
+    // twice — once wrapped in the system turn, once in the user turn — so it is
+    // excluded from the carry-over set.
+    const tenantText = context?.tenant_system_prompt?.trim() ?? "";
+    const carried = list
+      .filter(
+        (message) =>
+          message !== undefined &&
+          (message["role"] === "system" || message["role"] === "developer"),
+      )
+      .map((message) => readSystemText(message))
+      .filter((text) => text.length > 0 && !(tenantText.length > 0 && text === tenantText));
     applyBuddySystemPrompt(
-      messages as Array<Record<string, unknown>>,
+      list,
       CODEBUDDY_SYSTEM_PROMPT,
       context?.tenant_system_prompt,
+    );
+    carryOverSystemTextIntoUserTurn(
+      list,
+      carried,
+      CALLER_SYSTEM_CARRY_PREFIX,
+      CALLER_SYSTEM_CARRY_SUFFIX,
     );
   }
   normalizeBuddyToolNames(payload);
@@ -163,12 +199,20 @@ function flattenContent(content: unknown): string {
 }
 
 function neutralizeCnMessages(messages: Array<Record<string, unknown>>): void {
+  // Local patch: CN used to *drop* any caller system prompt longer than 2k chars
+  // (or shaped like an agent prompt), which silently destroyed user personas —
+  // roleplay/creative directives live in the system turn, so the model answered
+  // off-character. Upstream's neutral system turn is still required (it keeps
+  // the CN gate happy), but the caller's text is now carried into the leading
+  // user turn inside markers instead of being discarded.
+  const carried: string[] = [];
   for (let index = 0; index < messages.length; index += 1) {
     const message = messages[index];
     if (!message || message["role"] !== "system") continue;
     const content = message["content"];
-    const text = flattenContent(content);
+    const text = flattenContent(content).trim();
     if (text.length <= 2_000 && !isAgentPromptText(text)) continue;
+    if (text.length > 0) carried.push(text);
     messages[index] =
       typeof content === "string"
         ? { ...message, content: CODEBUDDY_CN_NEUTRAL_PROMPT }
@@ -177,7 +221,16 @@ function neutralizeCnMessages(messages: Array<Record<string, unknown>>): void {
             content: [{ type: "text", text: CODEBUDDY_CN_NEUTRAL_PROMPT }],
           };
   }
+  carryOverSystemTextIntoUserTurn(
+    messages,
+    carried,
+    CN_CARRY_OVER_PREFIX,
+    CN_CARRY_OVER_SUFFIX,
+  );
 }
+
+const CN_CARRY_OVER_PREFIX = "<user_instructions>";
+const CN_CARRY_OVER_SUFFIX = "</user_instructions>";
 
 export function codeBuddyCnPrePayload(
   payload: Record<string, unknown>,
@@ -190,8 +243,23 @@ export function codeBuddyCnPrePayload(
   buddyPrePayloadCommon(payload, request, "cn", context);
   if (Array.isArray(payload["messages"])) {
     const messages = payload["messages"] as Array<Record<string, unknown>>;
+    // Tenant injection arrives twice by design: the canonical `system` array
+    // carries it (canonical injection runs before the adapter) and the dispatch
+    // context carries the same text for providers that fold it into a fixed
+    // turn. CN has no such fixed turn to fold into, so take it out of the
+    // message list and append it to the single neutral system turn — leaving it
+    // in place would put two `system` messages on a wire that expects one.
+    const tenantText = context?.tenant_system_prompt?.trim() ?? "";
+    if (tenantText.length > 0) {
+      for (let index = messages.length - 1; index >= 0; index -= 1) {
+        const message = messages[index];
+        if (!message || message["role"] !== "system") continue;
+        if (flattenContent(message["content"]).trim() === tenantText) messages.splice(index, 1);
+      }
+    }
     neutralizeCnMessages(messages);
-    finalizeBuddyMessages(messages, { leadPrompt: CODEBUDDY_CN_NEUTRAL_PROMPT });
+    const leadPrompt = buddySystemPromptWithTenant(CODEBUDDY_CN_NEUTRAL_PROMPT, tenantText);
+    finalizeBuddyMessages(messages, { leadPrompt });
   }
   ensurePayloadModel(payload, candidate, "CodeBuddy CN");
   normalizeBuddyToolNames(payload);

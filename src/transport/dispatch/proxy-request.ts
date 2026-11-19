@@ -303,7 +303,9 @@ export async function handleProviderProxyRequest(
         estimatedUsage(prepared.estimatedInputTokens, prepared.estimatedOutputTokens);
       const pricedUsage = repriceUsage(usage, candidate.provider_id, candidate.model_id);
       const options = {
-        created: Date.now() / 1000,
+        // Whole seconds, same reason as the streaming path: a float `created`
+        // breaks strict int64 consumers of `chat.completion`.
+        created: Math.floor(Date.now() / 1000),
         include_usage: dispatchRequest.generation_controls["extension:include_usage"] === true,
       };
       const output =

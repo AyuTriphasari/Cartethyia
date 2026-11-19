@@ -216,17 +216,35 @@ describe("A1. the stated delay is honored", () => {
 // ─── B. The wait is bounded ────────────────────────────────────────────────
 
 describe("B1. one wait is capped", () => {
-  test("a huge stated delay is clamped to the per-wait cap", () => {
+  test("a stated delay above the per-wait cap is clamped to it", () => {
     const now = Date.now();
     const wait = codex429WaitMs({
-      serverDelayMs: 600_000,
+      serverDelayMs: 120_000,
       waitedMs: 0,
       retry: 0,
       deadline: now + 3_600_000,
       now,
     });
-    // 600s requested, 60s cap honored.
+    // 120s requested, 60s cap honored — still inside the 5-minute budget.
     expect(wait).toBe(60_000);
+  });
+
+  test("a window longer than the whole budget is retired instead of waited", () => {
+    const now = Date.now();
+    // Codex answers `usage_limit_reached` with the reset of the 5-hour window
+    // (~3.5h) or of the weekly one (days). Neither can clear inside the budget,
+    // so the error must be immediate rather than five minutes late.
+    for (const serverDelayMs of [12_846_000, 3 * 24 * 60 * 60_000]) {
+      expect(
+        codex429WaitMs({
+          serverDelayMs,
+          waitedMs: 0,
+          retry: 0,
+          deadline: now + 3_600_000,
+          now,
+        }),
+      ).toBeNull();
+    }
   });
 });
 
@@ -398,10 +416,14 @@ describe("D1. codex429WaitMs clamps", () => {
     ).toBe(1_200);
   });
 
-  test("caps one wait at 60s however long the server asked for", () => {
+  test("caps one wait at 60s for any delay that can still clear inside the budget", () => {
+    expect(
+      codex429WaitMs({ serverDelayMs: 120_000, waitedMs: 0, retry: 0, deadline: FAR, now: NOW }),
+    ).toBe(60_000);
+    // Past the budget the wait is not clamped — it is refused.
     expect(
       codex429WaitMs({ serverDelayMs: 3_600_000, waitedMs: 0, retry: 0, deadline: FAR, now: NOW }),
-    ).toBe(60_000);
+    ).toBeNull();
   });
 
   test("reserves the retry floor out of the deadline", () => {

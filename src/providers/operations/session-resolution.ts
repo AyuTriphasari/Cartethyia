@@ -48,27 +48,45 @@ export function resolveInboundSessionId(
   return deriveConversationAffinity(request);
 }
 
+/**
+ * Derives a conversation identity from the request body alone.
+ *
+ * **Both** the system prompt and the first turn are hashed together, and this is
+ * load-bearing rather than tidy. Hashing the system prompt alone made the key a
+ * property of the *tenant's configuration* instead of the conversation: a
+ * gateway used as a router — one API key, one shared "you are a helpful coding
+ * assistant" preamble, many unrelated conversations behind it — produced one
+ * identical key for all of them. Measured here on 2026-10-20 with four
+ * deliberately unrelated prompts under one shared system message: one distinct
+ * key, not four.
+ *
+ * For the upstream `prompt_cache_key` that was merely imprecise. For account
+ * affinity it is a routing catastrophe: one key means one pin, one pin means one
+ * account, and every conversation in the deployment funnels onto it while its
+ * siblings idle. Combining the opening turn keeps the key stable across the
+ * turns of one conversation (neither part changes) while separating conversations
+ * that share a preamble.
+ *
+ * Returns `undefined` rather than guessing when the combined seed carries too
+ * little text: a caller with no identity at all should get no affinity, which
+ * costs a cache hit and never concentrates traffic.
+ */
 function deriveConversationAffinity(request?: CanonicalRequest): string | undefined {
   if (!request) return undefined;
-  // If request has system prompt, use that
-  if (request.system && request.system.length > 0) {
-    const text = request.system
-      .map((p: ContentPart) => (p.kind === "text" ? p.text : ""))
-      .join("");
-    if (text.trim().length >= 30) {
-      return `aff_${createHash("sha256").update(text.trim().slice(0, 2048)).digest("hex").slice(0, 24)}`;
-    }
-  }
-  // Otherwise use the first message
+  const systemText =
+    request.system === undefined
+      ? ""
+      : request.system.map((p: ContentPart) => (p.kind === "text" ? p.text : "")).join("").trim();
   const first = request.messages[0];
-  if (!first) return undefined;
-  const firstText = first.content
-    .map((p: ContentPart) => (p.kind === "text" ? p.text : ""))
-    .join("");
-  if (firstText.trim().length >= 30) {
-    return `aff_${createHash("sha256").update(firstText.trim().slice(0, 2048)).digest("hex").slice(0, 24)}`;
-  }
-  return undefined;
+  const firstText =
+    first === undefined
+      ? ""
+      : first.content.map((p: ContentPart) => (p.kind === "text" ? p.text : "")).join("").trim();
+  // The separator is a NUL so no system/first-message split can collide with a
+  // different split that happens to concatenate to the same string.
+  const seed = [systemText.slice(0, 2048), firstText.slice(0, 2048)].filter((p) => p.length > 0).join("\u0000");
+  if (seed.length < 30) return undefined;
+  return `aff_${createHash("sha256").update(seed).digest("hex").slice(0, 24)}`;
 }
 
 /**
