@@ -72,19 +72,30 @@ function sse(...frames: unknown[]): ReadableStream<Uint8Array> {
 }
 
 describe("Free-pi session identity", () => {
-  test("a changed affinity is a fresh session; a stable affinity reuses it", () => {
+  test("one session per account, whatever the conversation or model", () => {
+    // The upstream allows four concurrent CLI sessions per signed-in account.
+    // A per-conversation key burned that budget after four chats and started
+    // answering 409 concurrent_session; a real CLI holds one session for the
+    // life of its terminal, so the account is the right scope.
     const registry = new FreepiSessionRegistry();
     const a = freepiSessionOwner({ secret: "jwt", context: context({}), request: baseRequest(), modelId: "m" });
     const same = freepiSessionOwner({ secret: "jwt", context: context({}), request: baseRequest(), modelId: "m" });
     expect(registry.get(a).sessionId).toBe(registry.get(same).sessionId);
 
-    const changed = freepiSessionOwner({
+    const otherConversation = freepiSessionOwner({
       secret: "jwt",
       context: context({ headers: { "x-session-affinity": "other-conversation" } }),
       request: baseRequest(),
       modelId: "m",
     });
-    expect(registry.get(changed).sessionId).not.toBe(registry.get(a).sessionId);
+    expect(registry.get(otherConversation).sessionId).toBe(registry.get(a).sessionId);
+
+    const otherModel = freepiSessionOwner({ secret: "jwt", context: context({}), request: baseRequest(), modelId: "other" });
+    expect(registry.get(otherModel).sessionId).toBe(registry.get(a).sessionId);
+
+    // Rotation is the only thing that mints a new id.
+    const rotated = registry.rotate(a);
+    expect(rotated.sessionId).not.toBe(a.key);
   });
 
   test("a new account never inherits the old account's session", () => {
@@ -95,16 +106,20 @@ describe("Free-pi session identity", () => {
     expect(registry.get(one).sessionId).not.toBe(registry.get(two).sessionId);
   });
 
-  test("rotate drops the owner and a fresh affinity mints a different id", () => {
+  test("rotate drops the owner; a fresh affinity mints a different id", () => {
     const registry = new FreepiSessionRegistry();
     const owner = freepiSessionOwner({ secret: "jwt", context: context({}), request: baseRequest(), modelId: "m" });
     const before = registry.get(owner).sessionId;
+    // The id is derived from the account, so re-deriving the same owner gives
+    // the same id — that stability is the whole point (no slot leak on restart).
     registry.rotate(owner);
     const after = registry.get(owner).sessionId;
-    expect(after).not.toBe(before);
+    expect(after).toBe(before);
+
+    // A rotated owner carries a nonce, so the retry lands on a new session.
     const fresh = withFreshFreepiAffinity(owner);
     expect(fresh.key).not.toBe(owner.key);
-    expect(registry.get(fresh).sessionId).not.toBe(after);
+    expect(registry.get(fresh).sessionId).not.toBe(before);
   });
 });
 

@@ -126,7 +126,14 @@ export function buildFreepiChatBody(
   const body: FreepiChatBody = {
     model: modelId,
     messages,
-    stream: request.stream,
+    // Always stream upstream, whatever the caller asked for.
+    //
+    // The upstream answers `stream:false` with a plain application/json body,
+    // and this adapter's parser only speaks SSE (`data:` frames) — so a
+    // buffered caller got HTTP 200 with `content: null` and no usage, silently.
+    // The CLI itself always streams; the gateway aggregates the events into a
+    // `chat.completion` for a buffered caller, which is the one path that works.
+    stream: true,
   };
   const extra: Record<string, unknown> = {};
   if (maxOutputTokens !== undefined && Number.isFinite(maxOutputTokens) && maxOutputTokens > 0) {

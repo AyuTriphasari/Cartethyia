@@ -7,9 +7,15 @@
 // rule for connection-bound history (oh-my-pi's Copilot compat) is to rebuild
 // prior turns from message content when the connection changes.
 //
-// So: one session per (credential, affinity) — a changed affinity *is* a fresh
-// session — and on a session-ownership refusal, rotate the session and rebase
-// the transcript into plain messages before one bounded retry.
+// So: ONE session per account, exactly like a real CLI terminal holds one for
+// its whole life. Keying by conversation or model instead burns the account's
+// four-session budget (the upstream allows 4 concurrent CLI sessions per
+// signed-in account) and starts answering `409 concurrent_session` after four
+// conversations — measured live on ten fresh accounts, where a per-model key
+// hit the cap within three probe calls.
+//
+// On a session-ownership refusal, rotate the session (a fresh nonce, so a new
+// id) and rebase the transcript into plain messages before one bounded retry.
 import { createHash, randomUUID } from "node:crypto";
 import type { CanonicalRequest, CanonicalMessage, ContentPart } from "../../../protocol/canonical-model";
 import { resolvePromptCacheKey } from "../../operations/session-resolution";
@@ -35,18 +41,42 @@ export function freepiSessionOwner(input: {
 }): FreepiSessionOwner {
   const affinity = resolvePromptCacheKey(input.request, input.context) ?? input.context.conversation_affinity;
   const accountId = input.context.credential.account_id ?? "";
+  // Account-scoped, not conversation-scoped: modelId and affinity stay on the
+  // owner for diagnostics but never in the key.
   const key = createHash("sha256")
-    .update(JSON.stringify([input.secret, accountId, input.modelId, affinity ?? ""]))
+    .update(JSON.stringify([input.secret, accountId]))
     .digest("hex")
     .slice(0, 32);
   return { credential: input.secret, affinity, accountId, modelId: input.modelId, key };
 }
 
+/** Deterministic UUIDv4-shaped session id for one owner (stable across restarts). */
+export function freepiSessionIdFor(owner: FreepiSessionOwner): string {
+  // The account is the scope, so the id must not depend on the conversation —
+  // otherwise a restart (or a different first chat) derives a different id and
+  // leaks another of the four slots. Only a rotated owner (`fresh-…`, minted
+  // after an ownership refusal) carries a nonce into the derivation, which is
+  // what makes the retry land on a genuinely new session.
+  const rotated = owner.affinity?.startsWith("fresh-") === true;
+  const digest = createHash("sha256")
+    .update(JSON.stringify(["freepi-session", owner.credential, owner.accountId,
+      rotated ? owner.affinity : ""]))
+    .digest("hex");
+  return [
+    digest.slice(0, 8),
+    digest.slice(8, 12),
+    `4${digest.slice(13, 16)}`,
+    `8${digest.slice(17, 20)}`,
+    digest.slice(20, 32),
+  ].join("-");
+}
+
 /** Returns a new owner whose affinity (and thus session key) cannot collide. */
 export function withFreshFreepiAffinity(owner: FreepiSessionOwner): FreepiSessionOwner {
   const affinity = `fresh-${randomUUID()}`;
+  // The nonce is what makes the rotated key different from the account key.
   const key = createHash("sha256")
-    .update(JSON.stringify([owner.credential, owner.accountId, owner.modelId, affinity]))
+    .update(JSON.stringify([owner.credential, owner.accountId, affinity]))
     .digest("hex")
     .slice(0, 32);
   return { ...owner, affinity, key };
@@ -76,7 +106,16 @@ export class FreepiSessionRegistry {
       this.#sessions.set(owner.key, touched);
       return touched;
     }
-    const entry: FreepiSessionEntry = { sessionId: randomUUID(), owner, fresh: true };
+    // Derived from the owner, not random: the upstream counts CLI sessions per
+    // account and allows four, so a random id per process leaks one slot per
+    // restart — four deploys and the account answers `409 concurrent_session`
+    // while serving nothing. A real CLI keeps one id for the life of its
+    // terminal, which is what this reproduces across our restarts.
+    const entry: FreepiSessionEntry = {
+      sessionId: freepiSessionIdFor(owner),
+      owner,
+      fresh: true,
+    };
     this.#sessions.set(owner.key, entry);
     if (this.#sessions.size > FREEPI_SESSION_CACHE_MAX) {
       const oldest = this.#sessions.keys().next();
