@@ -414,6 +414,12 @@ export class OpenAICompatibleAdapter extends BaseProviderAdapter {
         ? joinUrl(this.config.resolveBaseUrl?.(context) ?? this.config.base_url, this.config.channel_fallback_path)
         : undefined;
     const upstream = await postUpstreamJson(fetchUrl, headers, payload as Record<string, unknown>, context, outboundFetch, bodyEncoder);
+    if (process.env.CARTETHYIA_DUMP_WIRE === "1") {
+      await Bun.write(
+        "/tmp/wire-dump.json",
+        JSON.stringify({ url: fetchUrl, headers, body: payload }, null, 1),
+      );
+    }
     if (channelFallback !== undefined && upstream.res.status === 400) {
       // Read the body only for a 400 that could still be retried. The channel
       // check is the one refusal the console endpoint recovers from; a rejected
