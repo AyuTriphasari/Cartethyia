@@ -213,6 +213,20 @@ export function validateTransportConfig(
 export const POOL_KINDS = TRANSPORT_KINDS;
 export const POOL_STATUSES = ["active", "disabled"] as const;
 
+/**
+ * Statuses a pool can be *read* back in. The read tuple is deliberately wider
+ * than the write tuple above: `cooldown` is written only by the health machine
+ * (`recordPoolDispatchOutcome`) and must never be settable by an operator, but
+ * it is the status most rows are in right after a relay dies. Validating the
+ * list response against `POOL_STATUSES` made one cooling pool reject the WHOLE
+ * listing — `/console/api/network/pools` answered 400 `Pool status is invalid`
+ * and the dashboard rendered "Failed to load network pools" with no way to
+ * disable the dead relay that caused it. Keep the two tuples separate: the body
+ * schema and request types project `POOL_STATUSES`, response validation uses
+ * this one.
+ */
+export const POOL_RESPONSE_STATUSES = ["active", "cooldown", "disabled"] as const;
+
 /** Operator-settable pool status. */
 export type PoolStatus = (typeof POOL_STATUSES)[number];
 
@@ -288,7 +302,7 @@ export function sanitizePoolResponse(pool: unknown): NetworkPoolResponse {
   const p = pool as Record<string, unknown>;
   if (typeof p.kind !== "string" || !(POOL_KINDS as readonly string[]).includes(p.kind))
     throw new ConsoleDomainError("invalid_pool", 400, "Pool kind is required");
-  if (typeof p.status !== "undefined" && !(POOL_STATUSES as readonly string[]).includes(p.status as string))
+  if (typeof p.status !== "undefined" && !(POOL_RESPONSE_STATUSES as readonly string[]).includes(p.status as string))
     throw new ConsoleDomainError("invalid_pool", 400, "Pool status is invalid");
   const maxInflight = requiredPoolNumber(p.maxInflight, "maxInflight", 10);
   const weight = requiredPoolNumber(p.weight, "weight", 100);
