@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { log } from "../../observability/logger";
 import { healthEventBuffer } from "../../persistence/health-event-flush";
 import { and, eq, inArray, isNotNull, like, lte, or, sql } from "drizzle-orm";
 import { affectedRows, pruneExpiredCooldowns } from "../../persistence/dialect";
@@ -84,7 +85,13 @@ async function withTransaction<T>(
       return await db.transaction((tx) => mutate(tx as CartethyiaDatabase));
     }
     return await mutate(db);
-  } catch {
+  } catch (error) {
+    // Never silent: this helper is the only thing standing between a broken
+    // health write and a cooldown that never expires. Swallowing the error
+    // returned `fallback` (0 for the recovery sweep) on every tick, so every
+    // parked account stayed parked forever while the console showed a healthy
+    // gateway that simply answered `accounts_rate_limited` to all traffic.
+    log.error("[health] transactional health write failed", error as Error);
     return fallback;
   }
 }
@@ -716,7 +723,23 @@ export async function sweepExpiredCooldowns(db: CartethyiaDatabase): Promise<num
       .where(pruning.changed);
     return expired.length + affectedRows(pruned);
   };
-  return withTransaction(db, recover, 0);
+  // A failed transactional pass is retried WITHOUT one. `withTransaction`
+  // reports a swallowed failure as the `0` fallback, which reads exactly like
+  // "nothing was expired" — under sustained concurrent writes every parked
+  // account then stayed parked while the gateway answered
+  // `accounts_rate_limited` to all traffic. The retry is only on the error
+  // path, so a healthy tick still runs exactly one pass.
+  if (typeof db.transaction === "function") {
+    try {
+      return await db.transaction((tx) => recover(tx as CartethyiaDatabase));
+    } catch (error) {
+      log.error(
+        "[health] transactional account cooldown recovery failed; retrying without a transaction",
+        error as Error,
+      );
+    }
+  }
+  return recover(db);
 }
 
 /**
