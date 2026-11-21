@@ -128,9 +128,11 @@ describe("14003 model saturation — blast radius", () => {
       { origin: "upstream", scope: "provider", statusCode: 429, providerId: "workbuddy", modelId: "kimi-k3.1-pro" },
     );
     expect(classification.category).toBe("rate_limit_transient");
-    expect(classification.cooldownMs).toBe(0);
-    expect(classification.mutatesAccount).toBe(false);
-    // Not the saturation verdict, so the ladder is free to multiply this one.
+    // Not the saturation verdict: the account-wide rate-limit fallback, and the
+    // ladder is free to multiply it (unlike a saturated model's 5-minute
+    // window, which clears with upstream load).
+    expect(classification.cooldownMs).toBe(900_000);
+    expect(classification.mutatesAccount).toBe(true);
     expect(classification.noEscalation).toBe(false);
   });
 

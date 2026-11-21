@@ -116,59 +116,77 @@ const account429 = {
   credentialEvidence: true,
 };
 
-test("an unstated 429 skips: the row is untouched and the audit row names the account's real status", async () => {
+test("an unstated 429 parks the account for the configured fallback", async () => {
+  // Upstream 2.8.5 made this a no-op skip; measured 2026-11-21 that leaves
+  // every account of a rate-limited pool `active` while every request to it is
+  // refused, so the router never fails over and the client gets the 429 back.
+  // A parked account with a deadline is what makes failover work.
   const accountId = await insertAccount();
+  const before = Date.now();
   const classification = await recordAccountFailure(db!, accountId, new Error("Too many requests"), account429);
-  expect(classification?.mutatesAccount).toBe(false);
+  expect(classification?.mutatesAccount).toBe(true);
   await settle();
 
   const row = await rowOf(accountId);
-  expect(row.status).toBe("active");
-  expect(row.cooldownUntil).toBeNull();
-  expect(row.lastErrorCategory).toBeNull();
-  expect(row.lastError).toBeNull();
-  expect(row.consecutiveFailures).toBe(0);
+  expect(row.status).toBe("cooldown");
+  // The deadline is the configured rate-limit fallback, not "now" and not a
+  // provider-stated window (there is none).
+  expect(row.cooldownUntil).not.toBeNull();
+  const deadline = row.cooldownUntil!.getTime();
+  expect(deadline).toBeGreaterThan(before + 14 * 60_000);
+  expect(deadline).toBeLessThanOrEqual(before + 16 * 60_000);
+  expect(row.lastErrorCategory).toBe("rate_limit_transient");
+  expect(row.consecutiveFailures).toBe(1);
 
   const events = await eventsFor(accountId);
   expect(events).toHaveLength(1);
-  // The verdict's shape is "cooldown", but nothing was cooled — the row must
-  // say the account's own status, not claim a transition that never happened.
   expect(events[0]).toMatchObject({
     fromStatus: "active",
-    toStatus: "active",
+    toStatus: "cooldown",
     errorCategory: "rate_limit_transient",
   });
 });
 
-test("an immediate repeat of the same skip is compressed into the first audit row", async () => {
+test("a repeat report keeps the account parked and never shortens the window", async () => {
   const accountId = await insertAccount();
   await recordAccountFailure(db!, accountId, new Error("Too many requests"), account429);
+  const first = await rowOf(accountId);
+  // A second report while the window is still in force. Once the account is
+  // parked, routing stops selecting it, so this is the "same episode" case
+  // rather than a second incident.
   await recordAccountFailure(db!, accountId, new Error("Too many requests"), account429);
   await settle();
 
-  const events = await eventsFor(accountId);
-  expect(events).toHaveLength(1);
   const row = await rowOf(accountId);
-  expect(row.status).toBe("active");
-  expect(row.lastErrorCategory).toBeNull();
+  expect(row.status).toBe("cooldown");
+  // The guarantee that matters: a later report can only ever move the deadline
+  // later (`latestDeadlineMs`). It must never release an account the upstream
+  // just refused, and it must never hand back a shorter window than the one
+  // already in force.
+  expect(row.cooldownUntil!.getTime()).toBeGreaterThanOrEqual(first.cooldownUntil!.getTime());
+  expect(row.cooldownUntil!.getTime()).toBeGreaterThan(Date.now());
 });
 
-test("OpenRouter's shared-pool one-second retry_after is a skip too", async () => {
+test("OpenRouter's shared-pool one-second retry_after still parks for one sweep tick", async () => {
+  // A sub-tick stated window used to be a no-op skip. That arm is what left a
+  // whole pool `active` while every request to it was refused, so a 1-second
+  // hint now parks for the sweep tick instead: short enough to be honest about
+  // what the provider said, long enough for the health machine to act on it.
   const accountId = await insertAccount();
+  const before = Date.now();
   const classification = await recordAccountFailure(db!, accountId, new Error("rate limit exceeded"), {
     ...account429,
     retryAfterMs: 1_000,
   });
-  expect(classification?.mutatesAccount).toBe(false);
+  expect(classification?.mutatesAccount).toBe(true);
   await settle();
 
   const row = await rowOf(accountId);
-  expect(row.status).toBe("active");
-  expect(row.cooldownUntil).toBeNull();
-  expect(row.lastErrorCategory).toBeNull();
-  const events = await eventsFor(accountId);
-  expect(events).toHaveLength(1);
-  expect(events[0]?.fromStatus).toBe("active");
+  expect(row.status).toBe("cooldown");
+  const deadline = row.cooldownUntil!.getTime();
+  expect(deadline - before).toBeGreaterThanOrEqual(29_000);
+  expect(deadline - before).toBeLessThanOrEqual(31_000);
+  expect(row.lastErrorCategory).toBe("rate_limit_transient");
 });
 
 test("a stated window cools the account verbatim with the provider's own time", async () => {

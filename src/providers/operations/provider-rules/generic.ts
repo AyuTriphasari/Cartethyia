@@ -398,36 +398,45 @@ export const rateLimitRule: AccountErrorRule = {
       s.lower.includes("rpm limit")),
   decide: (s) => {
     const stated = s.statedCooldownMs;
-    // A rate limit the upstream gives no usable time for is never cooled and
-    // never flagged. The old behavior parked the account on a 15-minute
-    // fallback (or floored a trivial `retry_after: 1` up to it), which stamped
-    // a "Rate limited" pill that outlived any window and read as a ban with no
-    // expiry. Without a stated window there is nothing to wait out: the
-    // request fails over, the account stays `active`, and the audit row is the
-    // only record. `mutatesAccount: false` is the whole verdict — the writer's
-    // non-mutating path touches no account column.
-    if (stated === null || stated < MIN_FLAGGED_RATE_LIMIT_WINDOW_MS) {
-      return s.result(
-        "rate_limit_transient",
-        // Shape only — never applied, because the verdict does not mutate.
-        "cooldown",
-        0,
-        null,
-        s.reason("Provider rate limit with no usable window stated; account left active"),
-        false,
-      );
-    }
-    // A window the account can actually wait out is honored verbatim. The
-    // provider's own number is the flag's time — "Cooldown (in Xm)" names the
-    // window the upstream stated — so no floor invented here may stretch it.
-    // (The raw value also rides on `statedCooldownMs` for the auto-disable
-    // gate's sub-5-minute exemption.)
+    // A 429 always parks the account. Always.
+    //
+    // Upstream 2.8.5 made an unstated window a no-op skip, and kept a second
+    // skip for a stated window below the 30-second sweep tick. Measured
+    // 2026-11-21 on this install, both arms are what made the pool look dead:
+    // DeepAI answers `429 {"message":"Requests are temporarily limited. Try
+    // again later.","code":"rate_limit_exceeded"}` — and its `Retry-After`
+    // header lands under the floor — so *every* account of the pool stayed
+    // `active` while every request to it was refused. Nothing was cooled, so
+    // routing kept re-dialling the same dead accounts (683 refusals in twelve
+    // minutes across eight accounts, `consecutive_failures` still 0) and the
+    // client got the 429 back instead of the gateway failing over to a sibling.
+    //
+    // The fix is to stop treating "small or absent window" as "no verdict". A
+    // parked account with a deadline is what makes failover work: routing drops
+    // it for the window, the next candidate serves, and the sweep releases it
+    // when the deadline passes. The window is
+    //
+    //   max(provider's stated window, MIN_FLAGGED_RATE_LIMIT_WINDOW_MS)
+    //   or CARTETHYIA_ACCOUNT_RATE_LIMIT_COOLDOWN_MS when nothing was stated,
+    //
+    // so a provider that really means "retry in 1s" still gets released
+    // promptly (one sweep tick), and one that says nothing gets the configured
+    // 15-minute fallback. Neither can produce a sub-tick window that expires
+    // before the health machine can act on it.
+    const cooldownMs =
+      stated === null
+        ? resolveAccountRateLimitCooldownMs()
+        : Math.max(stated, MIN_FLAGGED_RATE_LIMIT_WINDOW_MS);
     return s.result(
       "rate_limit_transient",
       "cooldown",
-      stated,
-      new Date(Date.now() + stated),
-      s.reason("Provider rate limit"),
+      cooldownMs,
+      new Date(Date.now() + cooldownMs),
+      s.reason(
+        stated === null
+          ? "Provider rate limit with no stated window; parked for the fallback"
+          : "Provider rate limit",
+      ),
       s.origin === "upstream",
     );
   },

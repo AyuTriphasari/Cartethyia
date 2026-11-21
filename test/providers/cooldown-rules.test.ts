@@ -252,13 +252,18 @@ describe("recordAccountFailure tier-rule precedence", () => {
     expect(deadline - Date.now()).toBeLessThanOrEqual(DAY);
   });
 
-  test("Vertex/Antigravity 429 without a stated reset is a skip — no pair is cooled", async () => {
+  test("Vertex/Antigravity 429 without a stated reset parks the pair for the fallback", async () => {
     const accountId = await insertTraeAccount(null);
     // Exact upstream body captured 2026-11-09 (Antigravity/Vertex Gemini route):
-    // "Resource has been exhausted (e.g. check quota)." names no window. An
-    // unstated rate limit parks nothing: there is no window to wait out, so
-    // neither the tier rules nor a fallback cooldown apply and the (account,
-    // model) pair stays routable.
+    // "Resource has been exhausted (e.g. check quota)." names no window.
+    //
+    // Upstream 2.8.5 made an unstated rate limit a no-op skip, on the theory
+    // that "there is no window to wait out". Measured 2026-11-21: with nothing
+    // parked, the same refused pair stays routable and is re-dialled on every
+    // request — the pool never fails over and the caller just sees the 429.
+    // The pair now backs off for the configured rate-limit fallback, and the
+    // provider still gets no vote on the duration (it stated nothing, so
+    // `providerStated` stays false).
     const raw = JSON.stringify({
       error: {
         code: 429,
@@ -275,11 +280,15 @@ describe("recordAccountFailure tier-rule precedence", () => {
       modelId: "gemini-3.8-flash",
     });
     expect(classification?.providerStated).toBe(false);
-    expect(classification?.mutatesAccount).toBe(false);
+    expect(classification?.mutatesAccount).toBe(true);
+    expect(classification?.category).toBe("rate_limit_transient");
     const row = await rowOf(accountId);
+    // Model-scoped: the pair backs off, the account's own status is untouched,
+    // so every other model on this credential keeps serving.
     expect(row.status).toBe("active");
     const cooldowns = row.modelCooldowns as Record<string, string>;
-    expect(cooldowns["gemini-3.8-flash"]).toBeUndefined();
-    expect(row.lastErrorCategory).toBeNull();
+    expect(cooldowns["gemini-3.8-flash"]).toBeDefined();
+    expect(Date.parse(cooldowns["gemini-3.8-flash"]!)).toBeGreaterThan(Date.now());
+    expect(row.lastErrorCategory).toBe("rate_limit_transient");
   });
 });

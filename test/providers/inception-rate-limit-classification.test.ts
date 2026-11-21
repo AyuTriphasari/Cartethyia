@@ -58,19 +58,20 @@ test("an Inception rate-limit code shape matches", () => {
   expect(classification.cooldownMs).toBe(60_000);
 });
 
-test("a non-Inception 429 with no stated window is a skip, not a cooldown", () => {
-  // The generic arm no longer parks accounts on an invented 15-minute
-  // fallback: without a provider-stated window there is nothing to wait out,
-  // so the account is left active and only the audit row records the refusal.
+test("a non-Inception 429 with no stated window parks for the fallback", () => {
+  // Upstream 2.8.5 stopped parking here, leaving the account active with only
+  // an audit row. Measured 2026-11-21 that is what turns a bounded provider
+  // outage into an unbounded request storm: nothing is cooled, so routing keeps
+  // re-dialling a refused account and the caller never fails over.
   const classification = classifyAccountError(new Error("Rate limit exceeded. Please try again later."), {
     ...UPSTREAM,
     providerId: "openai",
     statusCode: 429,
   });
   expect(classification.category).toBe("rate_limit_transient");
-  expect(classification.mutatesAccount).toBe(false);
-  expect(classification.cooldownMs).toBe(0);
-  expect(classification.retryAt).toBeNull();
+  expect(classification.mutatesAccount).toBe(true);
+  expect(classification.cooldownMs).toBe(900_000);
+  expect(classification.retryAt).not.toBeNull();
 });
 
 test("a non-Inception stated window is honored verbatim, not floored to 15 minutes", () => {

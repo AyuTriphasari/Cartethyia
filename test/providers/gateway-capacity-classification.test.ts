@@ -62,9 +62,11 @@ test("a real upstream rate limit with a stated window still cools the account", 
   }
 });
 
-test("an unstated rate limit is a skip, not a cooldown", () => {
-  // No window stated means nothing to wait out: the account is neither parked
-  // nor flagged, and only the audit row records the refusal.
+test("an unstated rate limit parks for the configured fallback", () => {
+  // Upstream 2.8.5 made this a no-op skip. Measured 2026-11-21 that leaves a
+  // whole pool `active` while every request to it is refused: nothing cools, so
+  // routing re-dials the same dead accounts and the caller gets the 429 back
+  // instead of a sibling serving.
   for (const message of ["Rate limit reached for requests", "Too many requests"]) {
     const classification = classifyAccountError(new Error(message), {
       origin: "upstream",
@@ -72,8 +74,9 @@ test("an unstated rate limit is a skip, not a cooldown", () => {
       statusCode: 429,
     });
     expect(classification.category).toBe("rate_limit_transient");
-    expect(classification.mutatesAccount).toBe(false);
-    expect(classification.cooldownMs).toBe(0);
+    expect(classification.mutatesAccount).toBe(true);
+    expect(classification.cooldownMs).toBe(900_000);
+    expect(classification.retryAt).not.toBeNull();
   }
 });
 

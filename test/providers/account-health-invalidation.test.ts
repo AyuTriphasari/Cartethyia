@@ -73,17 +73,19 @@ describe("account error classification", () => {
     expect(classification.routesVisible).toBe(true);
   });
 
-  test("an unstated 429 is a skip at any scope", () => {
-    // Scope "provider" with no credential evidence and no stated window: the
-    // upstream named no time to wait out, so the account is neither parked nor
-    // flagged — the audit row is the only record.
+  test("an unstated 429 parks at any scope", () => {
+    // Scope "provider" with no credential evidence and no stated window. It
+    // used to be a skip: nothing parked, the audit row the only record. That is
+    // what leaves a whole pool `active` while every request to it is refused,
+    // so the account now backs off for the configured fallback and routing can
+    // fail over to a sibling.
     const classification = classifyAccountError(upstream("rate limit exceeded"), {
       origin: "upstream",
       scope: "provider",
     });
-    expect(classification.mutatesAccount).toBe(false);
-    expect(classification.cooldownMs).toBe(0);
-    expect(classification.retryAt).toBeNull();
+    expect(classification.mutatesAccount).toBe(true);
+    expect(classification.cooldownMs).toBe(900_000);
+    expect(classification.retryAt).not.toBeNull();
   });
 
   test("a provider-scoped stated window still mutates", () => {
@@ -541,12 +543,13 @@ describe("a reset window the upstream stated in structured fields", () => {
     expect(classification.mutatesAccount).toBe(true);
   });
 
-  test("a one-second retry_after is a skip, not a cooldown", () => {
+  test("a one-second retry_after parks for one sweep tick, not fifteen minutes", () => {
     // The reported OpenRouter shape: `retry_after_seconds: 1` is a "retry
-    // shortly" nudge, not a parking window. Flooring it up to the configured
-    // cooldown once flagged the account "Rate limited" for a window ten times
-    // longer than the upstream named — and the pill outlived the cooldown with
-    // no time behind it. Below one sweep tick the verdict is a skip.
+    // shortly" nudge. It used to be a skip, which left the account `active` and
+    // re-dialled inside a window the upstream had closed. Now it parks — for
+    // the sweep tick, not the 15-minute fallback — so the deadline is honest
+    // about what the provider said and still long enough for the health machine
+    // to act on it.
     const classification = classifyAccountError(
       new GatewayError("upstream_error" as never, 429, "rate limit exceeded"),
       {
@@ -556,9 +559,9 @@ describe("a reset window the upstream stated in structured fields", () => {
       },
     );
     expect(classification.category).toBe("rate_limit_transient");
-    expect(classification.mutatesAccount).toBe(false);
-    expect(classification.cooldownMs).toBe(0);
-    expect(classification.retryAt).toBeNull();
+    expect(classification.mutatesAccount).toBe(true);
+    expect(classification.cooldownMs).toBe(30_000);
+    expect(classification.retryAt).not.toBeNull();
     expect(classification.statedCooldownMs).toBe(1_000);
   });
 
@@ -584,25 +587,25 @@ describe("a reset window the upstream stated in structured fields", () => {
   });
 
   test("a reset already in the past is not a window", () => {
-    // A stale `resets_at` would otherwise compute a negative delay and, at
-    // worst, return the account to rotation immediately. With no usable window
-    // stated the verdict is a skip — there is no fallback cooldown to fall
-    // back to anymore.
+    // A stale `resets_at` computes a negative delay, so it is discarded and the
+    // verdict falls back to the configured cooldown. It used to fall back to a
+    // skip instead, which left the account in rotation immediately — exactly
+    // the outcome the guard exists to prevent.
     const classification = classifyAccountError(
       withRawBody("rate limit exceeded", JSON.stringify({ error: { resets_at: 1 } })),
       { ...evidence, statusCode: 429 },
     );
-    expect(classification.mutatesAccount).toBe(false);
-    expect(classification.cooldownMs).toBe(0);
+    expect(classification.mutatesAccount).toBe(true);
+    expect(classification.cooldownMs).toBe(900_000);
   });
 
-  test("a body that is not JSON states no window, so the verdict is a skip", () => {
+  test("a body that is not JSON states no window, so the fallback applies", () => {
     const classification = classifyAccountError(
       withRawBody("rate limit exceeded", "<html>not json</html>"),
       { ...evidence, statusCode: 429 },
     );
-    expect(classification.mutatesAccount).toBe(false);
-    expect(classification.cooldownMs).toBe(0);
+    expect(classification.mutatesAccount).toBe(true);
+    expect(classification.cooldownMs).toBe(900_000);
   });
 });
 
