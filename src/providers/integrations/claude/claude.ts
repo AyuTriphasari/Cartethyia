@@ -332,16 +332,45 @@ export class ClaudeAdapter implements ProviderAdapter {
       if (lastIndex > 0) {
         const last = assembled[lastIndex];
         const existing = isRecord(last) ? last["cache_control"] : undefined;
-        // A caller's own breakpoint is kept, but upgraded to the reference
-        // client's 1h retention when it stated none: that is the default the
-        // real CLI sends, and leaving it bare caches a shorter prefix than the
-        // upstream will honour.
-        const breakpoint =
-          isRecord(existing) && existing["ttl"] !== undefined
-            ? existing
-            : { type: "ephemeral", ttl: "1h" };
+        // Anthropic validates cache TTLs along the wire order
+        // (tools -> system -> messages) and rejects a 1h block that follows a
+        // 5m one. The translation layer already breakpoints the last tool and
+        // the last system block from the caller's hint, and a bare `ephemeral`
+        // there means Anthropic's 5m default — so upgrading only this tail to
+        // the reference client's 1h retention produced
+        // "a ttl='1h' block must not come after a ttl='5m' block" on every
+        // tool-carrying request. Align the whole prefix to one retention
+        // instead: an explicit caller TTL always wins, and a bare breakpoint
+        // follows whatever this tail uses.
+        const tools = Array.isArray(payload.tools) ? (payload.tools as unknown[]) : [];
+        const breakpoints = [...tools, ...assembled.slice(0, lastIndex)].filter((block) => {
+          const control = isRecord(block) ? block["cache_control"] : undefined;
+          return isRecord(control);
+        }) as Record<string, unknown>[];
+        const pinnedShort = breakpoints.some((block) => {
+          const control = block["cache_control"] as Record<string, unknown>;
+          return control["ttl"] === "5m";
+        });
+        const requestedTtl =
+          isRecord(existing) && (existing["ttl"] === "1h" || existing["ttl"] === "5m")
+            ? existing["ttl"]
+            : undefined;
+        const tailTtl = pinnedShort ? "5m" : (requestedTtl ?? "1h");
+        for (const block of breakpoints) {
+          const control = block["cache_control"] as Record<string, unknown>;
+          if (control["ttl"] === undefined) {
+            block["cache_control"] = { ...control, ttl: tailTtl };
+          }
+        }
         if (isRecord(last)) {
-          assembled[lastIndex] = { ...last, cache_control: breakpoint };
+          assembled[lastIndex] = {
+            ...last,
+            cache_control: {
+              ...(isRecord(existing) ? existing : {}),
+              type: "ephemeral",
+              ttl: tailTtl,
+            },
+          };
         }
       }
       payload.system = assembled;

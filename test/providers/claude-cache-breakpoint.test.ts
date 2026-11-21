@@ -22,6 +22,8 @@ const TARGET: ProviderDispatchTarget = {
   model_id: "claude-sonnet-4-6",
   wire_family: "messages",
   endpoint_path: "/v1/messages",
+  // The adapter rejects tools unless the route advertises the capability.
+  capabilities: { tools: true },
 } as unknown as ProviderDispatchTarget;
 
 function makeRequest(systemPrompt?: string): CanonicalRequest {
@@ -75,6 +77,44 @@ async function dispatchedSystem(systemPrompt?: string): Promise<readonly SystemB
   return captured;
 }
 
+/**
+ * Captures the full serialized body. `withTools` adds one tool so the request
+ * exercises the tools -> system ordering Anthropic validates cache TTLs in.
+ */
+async function dispatchedBodies(
+  systemPrompt?: string,
+  withTools = false,
+): Promise<readonly Record<string, unknown>[]> {
+  const bodies: Record<string, unknown>[] = [];
+  const fetcher = (async (_url: unknown, init?: RequestInit): Promise<Response> => {
+    bodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+    return new Response("{}", { status: 200 });
+  }) as unknown as typeof fetch;
+  const claude = new ClaudeAdapter({ fetch: fetcher });
+  const request = makeRequest(systemPrompt);
+  const withTool =
+    withTools === false
+      ? request
+      : ({
+          ...request,
+          tools: [
+            {
+              name: "lookup",
+              description: "Look something up.",
+              jsonSchema: { type: "object", properties: {} },
+            },
+          ],
+        } as unknown as CanonicalRequest);
+  try {
+    for await (const _event of claude.dispatch(withTool, TARGET, makeContext())) {
+      void _event;
+    }
+  } catch {
+    // A dispatch that throws still records what it sent.
+  }
+  return bodies;
+}
+
 describe("Claude Code system block assembly", () => {
   test("billing leads and carries no breakpoint", async () => {
     const system = await dispatchedSystem("Stay concise.");
@@ -103,5 +143,42 @@ describe("Claude Code system block assembly", () => {
     expect(system).toHaveLength(2);
     expect(system[1]?.text).toBe(CLAUDE_CODE_SYSTEM_INSTRUCTION);
     expect(system[1]?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+  });
+
+  // Anthropic validates cache TTLs in wire order (tools -> system -> messages)
+  // and 400s a 1h block that follows a 5m one. The translation layer emits a
+  // breakpoint on the last tool, and a bare `ephemeral` there means Anthropic's
+  // 5m default — so upgrading only the system tail to 1h made every
+  // tool-carrying request fail:
+  // "system.1.cache_control.ttl: a ttl='1h' cache_control block must not come
+  // after a ttl='5m' cache_control block."
+  test("no 1h breakpoint follows a 5m breakpoint in wire order", async () => {
+    const bodies = await dispatchedBodies("Stay concise.", true);
+    const body = bodies[0] as {
+      tools?: readonly SystemBlock[];
+      system?: readonly SystemBlock[];
+      messages?: readonly { content?: readonly SystemBlock[] }[];
+    };
+    // Wire order is exactly what Anthropic walks when it validates.
+    const ordered: SystemBlock[] = [
+      ...(body.tools ?? []),
+      ...(body.system ?? []),
+      ...(body.messages ?? []).flatMap((message) =>
+        Array.isArray(message.content) ? message.content : [],
+      ),
+    ].filter((block) => block !== undefined);
+    const breakpoints = ordered.filter((block) => block.cache_control !== undefined);
+    // A tool breakpoint must exist for this test to exercise the ordering rule.
+    expect((body.tools ?? []).some((block) => block.cache_control !== undefined)).toBe(true);
+
+    let sawShort = false;
+    for (const block of breakpoints) {
+      const control = block.cache_control as { ttl?: string };
+      // A bare breakpoint is Anthropic's 5m default, i.e. a short block.
+      if (control.ttl !== "1h") sawShort = true;
+      if (sawShort) {
+        expect(control.ttl).not.toBe("1h");
+      }
+    }
   });
 });
