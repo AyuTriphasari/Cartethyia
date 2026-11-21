@@ -21,10 +21,10 @@ import { expect, test } from "bun:test";
 import { classifyAccountError } from "../../src/providers/operations/account-health-service";
 import {
   classifyUpstreamError,
-  classifyUpstreamFailure,
   mapUpstreamHttpError,
   upstreamErrorIdentifier,
-} from "../../src/transport/failure-policy";
+} from "../../src/protocol/upstream-errors";
+import { classifyUpstreamFailure } from "../../src/protocol/failure-classify";
 import { GatewayError } from "../../src/protocol/gateway-error";
 
 const SESSION_BUSY = {
@@ -35,10 +35,16 @@ const SESSION_BUSY = {
   },
 };
 
+/**
+ * A reset the provider states must be in the future for the parser to honour
+ * it, so the stamp is computed: a hard-coded date made this test a time bomb
+ * that started failing the day after it was written (the 23 h window silently
+ * became "the past", and the assertion saw the 1 h fallback instead).
+ */
+const THEOS_RESET_AT = new Date(Date.now() + 23 * 60 * 60 * 1000).toISOString();
 const THEOS_SPENT = {
   error: {
-    message:
-      "Free daily Theos are not available right now. Try again at 2026-11-20T09:55:41+00:00.",
+    message: `Free daily Theos are not available right now. Try again at ${THEOS_RESET_AT}.`,
     type: "machine_bound",
     code: "machine_bound",
   },

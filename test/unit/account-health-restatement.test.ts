@@ -25,7 +25,7 @@
 import { describe, expect, test } from "bun:test";
 import { GatewayError } from "../../src/protocol/gateway-error";
 import type { CartethyiaDatabase } from "../../src/persistence/db-handle";
-import { classifyUpstreamFailure } from "../../src/transport/failure-policy";
+import { classifyUpstreamFailure } from "../../src/protocol/failure-classify";
 import {
   classifyAccountError,
   recordAccountFailure,

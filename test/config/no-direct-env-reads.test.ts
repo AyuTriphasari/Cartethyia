@@ -83,6 +83,14 @@ const ALLOW_LIST: Readonly<Record<string, Readonly<Record<string, string>>>> = {
     CARTETHYIA_TELEMETRY_PAYLOAD_DIR: "telemetry storage path override",
     CARTETHYIA_TELEMETRY_PAYLOAD_FILE_MAX_BYTES: "telemetry file-size override",
   },
+  "src/providers/adapters/compatible-adapter.ts": {
+    // Wire-dump debug hook (local patch): setting it to "1" writes the exact
+    // outbound URL/headers/body of the next compatible-provider dispatch to
+    // /tmp/wire-dump.json so a refusal can be replayed byte for byte. Read
+    // once per dispatch, never an operator-tunable behaviour, and deliberately
+    // outside CONFIG_SPEC so it cannot appear in `.env.example` as a knob.
+    CARTETHYIA_DUMP_WIRE: "local wire-dump debug hook, not an operator knob",
+  },
   "src/providers/integrations/buddy/headers.ts": {
     // Buddy device-token file path, injected by the deployment image, not an
     // operator-facing knob — kept in the integration so it is reviewed with

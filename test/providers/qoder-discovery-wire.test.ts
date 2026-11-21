@@ -51,7 +51,11 @@ describe("Qoder model discovery wire", () => {
       encode: (bytes: Uint8Array) => Buffer.from(bytes).toString("latin1"),
     });
     expect(captured.method).toBe("GET");
-    expect(captured.url).toContain("/algo/api/v2/model/list?Encode=*");
+    // `Encode=1`, not upstream's `Encode=*` — see the note on `QODER_MODELS_PATH`
+    // in `qoder-realm.ts`: the `*` transform is not the alphabet scramble this
+    // adapter emits, so the upstream fails it in `EncryptUtil.decode`. Measured
+    // live 2026-11-17; re-verify on each upstream sync.
+    expect(captured.url).toContain("/algo/api/v2/model/list?Encode=1");
     expect(captured.body).toBe("{}");
     expect(models.map((m) => m.modelId).sort()).toEqual(["auto", "deepseek-v4-pro"]);
   });

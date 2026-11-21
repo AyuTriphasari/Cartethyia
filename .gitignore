@@ -2,6 +2,9 @@ node_modules/
 dist/
 .env
 .env.*
+# Local smoke-test credential minted by scripts/_mint_test_key.ts. Never tracked:
+# it is a live gateway key for whichever database the local .env points at.
+.smoke-key
 !.env.example
 !.env.test
 !.env.test.example

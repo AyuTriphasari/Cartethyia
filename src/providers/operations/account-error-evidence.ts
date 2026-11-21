@@ -19,6 +19,61 @@ import { transientRateLimitWording } from "./account-error-contracts";
 import { isBuddyAccountBanned } from "./provider-rules/buddy";
 
 /**
+ * Whether the upstream reported the *model* as saturated rather than the account
+ * as rate limited.
+ *
+ * Tencent's buddy family (CodeBuddy/WorkBuddy) answers
+ * `{"code":14003,"msg":"too many requests","displayMsg":{"en":"Model busy.
+ * Please switch models or retry later"},"displayTips":{"en":"This model is
+ * currently saturated. It is not a network issue. Please switch to another
+ * model or wait a moment and retry."},"actions":["SWITCH_MODEL",
+ * "SUBMIT_FEEDBACK","RETRY"]}`.
+ *
+ * Matched on the *wording and the offered remedy*, not on the bare `14003`: the
+ * extracted `message` is only "too many requests", so the code alone is the
+ * same shape as an ordinary per-account rate limit and cooling the account for
+ * it is wrong. `displayTips` even says "it is not a network issue" and names
+ * switching models as the fix — a remedy that only exists if the account's
+ * other models stay routable. That is what makes this model-scoped.
+ */
+function isModelSaturation(lower: string, upstreamBody: unknown): boolean {
+  const phrases = [
+    "model busy",
+    "model is currently saturated",
+    "model currently saturated",
+    "model saturated",
+    "switch models",
+    "switch to another model",
+    "switch to a less busy model",
+  ];
+  if (phrases.some((phrase) => lower.includes(phrase))) return true;
+  const body = isRecord(upstreamBody) ? upstreamBody : undefined;
+  if (body === undefined) return false;
+  for (const field of ["displayMsg", "displayTips", "msg", "message"]) {
+    const value = body[field];
+    const texts =
+      typeof value === "string"
+        ? [value]
+        : isRecord(value)
+          ? Object.values(value).filter((nested): nested is string => typeof nested === "string")
+          : [];
+    for (const text of texts) {
+      const folded = text.toLowerCase();
+      if (phrases.some((phrase) => folded.includes(phrase))) return true;
+    }
+  }
+  // `actions` names the remedy the provider itself offers. `SWITCH_MODEL` can
+  // only be honest advice if the other models on this account still work.
+  const actions = body["actions"];
+  if (Array.isArray(actions)) {
+    for (const action of actions) {
+      if (typeof action === "string" && action.toUpperCase().includes("SWITCH_MODEL")) return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Backoff for a failure no rule matched. Short on purpose: an unclassified
  * error is more likely a new upstream shape than a broken account, so the
  * account returns to rotation quickly.
@@ -199,6 +254,8 @@ export interface AccountErrorContext {
    * merely refusing the request.
    */
   readonly buddyBanned: boolean;
+  /** The upstream named the *model* as saturated rather than the account throttled. */
+  readonly modelSaturated: boolean;
   readonly reason: (prefix: string) => string;
   readonly result: AccountErrorResult;
 }
@@ -350,6 +407,7 @@ export function accountErrorContext(
     mutatesAccount = canMutate,
     modelUnsupported = false,
     modelScoped = false,
+    noEscalation = false,
   ): AccountErrorClassification => ({
     category,
     status,
@@ -378,6 +436,7 @@ export function accountErrorContext(
       !(statusCode === 503 || statusCode === 529),
     modelUnsupported,
     modelScoped,
+    noEscalation,
   });
 
   return {
@@ -395,6 +454,7 @@ export function accountErrorContext(
     statedCooldownMs,
     rawUpstreamResponse,
     buddyBanned: isBuddyAccountBanned(lower, providerCode, banBody),
+    modelSaturated: isModelSaturation(lower, banBody),
     reason,
     result,
   };

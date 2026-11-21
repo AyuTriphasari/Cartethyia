@@ -116,14 +116,22 @@ describe("14003 model saturation — blast radius", () => {
 
   test("an ordinary 429 is untouched by this rule", () => {
     // The narrow match matters: a bare "too many requests" with no model
-    // remedy is a genuine rate limit and keeps its own (longer) window.
+    // remedy is a genuine rate limit, so it keeps the rate-limit arm and never
+    // the model-scoped saturation window.
+    //
+    // Since upstream 2.8.5 a rate limit that states *no usable window* is a
+    // skip rather than a fallback park: nothing about the account is cooled and
+    // the audit row is the only record. That is why `cooldownMs` is 0 here —
+    // the assertion that matters is the category and the absence of escalation.
     const classification = classifyAccountError(
       { message: "429 too many requests", status: 429 },
       { origin: "upstream", scope: "provider", statusCode: 429, providerId: "workbuddy", modelId: "kimi-k3.1-pro" },
     );
     expect(classification.category).toBe("rate_limit_transient");
-    expect(classification.cooldownMs).toBe(900_000);
-    expect(classification.noEscalation).toBeUndefined();
+    expect(classification.cooldownMs).toBe(0);
+    expect(classification.mutatesAccount).toBe(false);
+    // Not the saturation verdict, so the ladder is free to multiply this one.
+    expect(classification.noEscalation).toBe(false);
   });
 
   test("the provider code alone does not trigger it", () => {

@@ -131,6 +131,5 @@ Variables read outside the spec are therefore **not** listed below:
 | `CARTETHYIA_RESET_CREDIT_WEEKLY_FLOOR_PERCENT` | integer | 1 | 0 – 100 |
 | `CARTETHYIA_RESET_CREDIT_SWEEP_INTERVAL_MS` | integer | 120000 | 30000 – 3600000 |
 | `CARTETHYIA_RESET_CREDIT_RETRY_MS` | integer | 600000 | 60000 – 86400000 |
-| `CARTETHYIA_OAUTH_CALLBACK_PORT` | integer | 59653 | 1024 – 65535 |
 | `CARTETHYIA_ZCODE_AUTO_CLAIM` | string | `false` | — |
 | `CARTETHYIA_OPENCODE_UNAVAILABLE_FREE` | comma-separated list | unset | — |

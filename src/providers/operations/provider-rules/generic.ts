@@ -6,6 +6,7 @@
 import {
   resolveAccountAuthRejectedCooldownMs,
   resolveAccountDisabledRecoveryMs,
+  resolveAccountModelBusyCooldownMs,
   resolveAccountModelCapacityCooldownMs,
   resolveAccountQuotaCooldownMs,
   resolveAccountRateLimitCooldownMs,
@@ -299,6 +300,14 @@ export const quotaExhaustedRule: AccountErrorRule = {
         s.lower.includes("included free usage"));
     const buddyCreditsExhausted =
       s.providerCode === "14018" || s.lower.includes("credits exhausted");
+    // DeepAI Code spends a pooled daily allowance ("Theos") and answers
+    // `403 {"code":"machine_bound"}` with "Free daily Theos are not available
+    // right now. Try again at <ISO>" once it is spent. Model-scoped on purpose:
+    // the catalog carries eleven zero-Theos models that keep serving, so the
+    // verdict belongs on the (account, model) pair, not the credential.
+    const deepaiDailyTheos =
+      s.providerId === "deepai" &&
+      (s.providerCode === "machine_bound" || s.lower.includes("free daily theos"));
     const cooldownMs = grokFreeTier
       ? (s.statedCooldownMs ?? GROK_QUOTA_COOLDOWN_MS)
       : buddyCreditsExhausted
@@ -316,7 +325,7 @@ export const quotaExhaustedRule: AccountErrorRule = {
       s.reason("Provider quota exhausted"),
       s.origin === "upstream",
       false,
-      grokFreeUsageModelScope && s.modelId !== undefined,
+      (grokFreeUsageModelScope || deepaiDailyTheos) && s.modelId !== undefined,
     );
   },
 };
@@ -332,6 +341,47 @@ export const quotaExhaustedRule: AccountErrorRule = {
  * the refusal.
  */
 export const MIN_FLAGGED_RATE_LIMIT_WINDOW_MS = 30_000;
+
+/**
+ * A saturated *model* is not a rate-limited *account*.
+ *
+ * Buddy `14003` extracts to the two words "too many requests", so the
+ * `rate-limit` arm below claimed it and cooled the whole account for the
+ * 15-minute fallback — which the escalation ladder then doubled toward the
+ * one-hour ceiling on every repeat. One busy model parked a healthy account
+ * for an hour while the provider had offered "switch models" as the way to
+ * keep working, and its own `displayTips` said the model, not the network,
+ * was the problem.
+ *
+ * `model_capacity` is what scopes the write to the (account, model) pair
+ * (`recordAccountFailure` writes `modelCooldowns[modelId]` and leaves the
+ * account status alone), so the sibling models keep serving. The window is the
+ * dedicated 5-minute fallback and `noEscalation` keeps the ladder off it:
+ * saturation clears with upstream load, not with our backoff.
+ *
+ * Must precede `rate-limit`, which is broader on the same wording.
+ */
+export const modelSaturatedRule: AccountErrorRule = {
+  name: "model-saturated",
+  match: (s) => s.modelSaturated,
+  decide: (s) => {
+    const cooldownMs = s.statedCooldownMs ?? resolveAccountModelBusyCooldownMs();
+    return s.result(
+      "model_capacity",
+      "cooldown",
+      cooldownMs,
+      new Date(Date.now() + cooldownMs),
+      s.reason("Provider model saturated"),
+      // Provider-scoped evidence still has to reach the writer: a stream frame
+      // carries no credential detail, so `canMutate` is false and the pair
+      // would be retried inside the window the upstream just closed.
+      s.origin === "upstream" && s.scope === "provider",
+      false,
+      false,
+      true,
+    );
+  },
+};
 
 export const rateLimitRule: AccountErrorRule = {
   name: "rate-limit",
@@ -467,6 +517,16 @@ export const transportFaultRule: AccountErrorRule = {
     // that account down, or it stays `active` and is re-dialled for as long as
     // the block lasts. Provider-scoped 5xx does not: the upstream is
     // indiscriminately failing and no single account is at fault.
+    //
+    // An **abort** is the exception even when the caller scoped it to the
+    // account: it says the exchange was cancelled, not that the account is
+    // unusable. Measured on the Codex pool, `Provider network failure: aborted`
+    // parked a healthy account 45 times in seventeen hours — the upstream had
+    // simply dropped a stream, and the account answered the next request
+    // normally. The row is still written (the cause belongs in the health log),
+    // but nothing is cooled, so the account stays routable for the retry that
+    // actually works.
+    const aborted = /\babort(?:ed|error)?\b/.test(s.lower);
     const transientMs = TRANSIENT_ERROR_COOLDOWN_MS();
     return s.result(
       s.lower.includes("timeout") ? "timeout" : "server_error",
@@ -474,7 +534,7 @@ export const transportFaultRule: AccountErrorRule = {
       transientMs,
       new Date(Date.now() + transientMs),
       s.reason(`Provider ${s.statusCode ?? "network"} failure`),
-      s.canMutate,
+      aborted ? false : s.canMutate,
     );
   },
 };

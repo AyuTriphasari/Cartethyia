@@ -30,6 +30,7 @@ import {
   gatewayCapacityExhaustedRule,
   modelCapacityRule,
   modelPlanGatedRule,
+  modelSaturatedRule,
   modelUnreachableRule,
   modelUnsupportedRule,
   priceRefusalRule,
@@ -71,6 +72,7 @@ export function classifyAccountError(
     rawUpstreamResponse,
     statedCooldownMs,
     buddyBanned,
+    modelSaturated,
     reason,
     result,
   } = accountErrorContext(error, options);
@@ -142,6 +144,14 @@ export function classifyAccountError(
       providerCode === "quota_exceeded" ||
       providerCode === "subscription:free-usage-exhausted" ||
       providerCode === "14018" ||
+      // DeepAI Code's spent pooled daily allowance ("Theos"). The status is
+      // 403, which the bare-credential arm would read as auth evidence and cool
+      // — then disable — accounts whose keys were perfectly valid (measured
+      // 2026-11-19: one six-request burst flipped eight healthy accounts to
+      // `auth_invalidated`). The code is the verdict; `machine_bound` is not
+      // auth vocabulary.
+      providerCode === "machine_bound" ||
+      lower.includes("free daily theos") ||
       // CodeBuddy/WorkBuddy rate limit: `{"code":"6004","msg":"usage exceeds
       // frequency limit ... your usage will reset at <stamp> UTC+8"}`. The
       // message names a reset, so this is a parked window, not a transient
@@ -282,6 +292,7 @@ export function classifyAccountError(
     hostedToolFailure,
     modelEntitlementFailure,
     queuedUpstream,
+    modelSaturated,
     validationRequired,
     validationUrl,
     // A quota/spend/cap signal rotates to a sibling account; a per-minute
@@ -343,6 +354,7 @@ const ACCOUNT_ERROR_RULES: readonly AccountErrorRule[] = [
   qoderModelQuotaRule,
   quotaExhaustedRule,
   ...inceptionRules,
+  modelSaturatedRule,
   rateLimitRule,
   modelCapacityRule,
   modelUnsupportedRule,

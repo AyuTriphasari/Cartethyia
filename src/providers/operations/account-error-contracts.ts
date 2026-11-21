@@ -151,6 +151,7 @@ export type AccountErrorResult = (
   mutatesAccount?: boolean,
   modelUnsupported?: boolean,
   modelScoped?: boolean,
+  noEscalation?: boolean,
 ) => AccountErrorClassification;
 
 /** The shared signals every arm reads, computed once per classification. */
@@ -188,6 +189,8 @@ export interface AccountErrorSignals {
   readonly hostedToolFailure: boolean;
   readonly modelEntitlementFailure: boolean;
   readonly queuedUpstream: boolean;
+  /** The upstream named the *model* as saturated, not the account as throttled. */
+  readonly modelSaturated: boolean;
   readonly validationRequired: boolean;
   readonly validationUrl: string | undefined;
   /** True when this failure should switch to a sibling account rather than wait. */
@@ -265,6 +268,15 @@ export interface AccountErrorClassification {
    * (`fallback`) escalates.
    */
   readonly ruleSource?: "provider-rule" | "fallback";
+  /**
+   * The cooldown clears with upstream load, not with our backoff, so the
+   * consecutive-failure ladder must not multiply it. A saturated model is the
+   * case that matters: the provider is describing congestion and naming
+   * "switch models" as the remedy, and doubling that window toward the
+   * one-hour ceiling keeps a healthy model dark long after the upstream had
+   * room again.
+   */
+  readonly noEscalation?: boolean;
 }
 
 /**
@@ -311,8 +323,9 @@ export function escalateFallbackCooldown(
   cooldownMs: number,
   providerStated: boolean,
   consecutiveFailures: number,
+  noEscalation = false,
 ): number {
-  if (providerStated || cooldownMs <= 0) return cooldownMs;
+  if (providerStated || noEscalation || cooldownMs <= 0) return cooldownMs;
   const level = Math.min(Math.max(0, consecutiveFailures), COOLDOWN_ESCALATION_MAX_LEVEL);
   return Math.min(cooldownMs * 2 ** level, resolveAccountCooldownEscalationMaxMs());
 }
@@ -332,9 +345,10 @@ export function applyRuleEscalation(
   providerStated: boolean,
   consecutiveFailures: number,
   ruleSource: "provider-rule" | "fallback" | undefined,
+  noEscalation = false,
 ): number {
   if (ruleSource === "provider-rule") return cooldownMs;
-  return escalateFallbackCooldown(cooldownMs, providerStated, consecutiveFailures);
+  return escalateFallbackCooldown(cooldownMs, providerStated, consecutiveFailures, noEscalation);
 }
 
 /**
