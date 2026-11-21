@@ -65,6 +65,15 @@ interface IpAbuseAttempt {
   readonly limit: number;
   readonly banThreshold: number;
   readonly banDurationMs: number;
+  /**
+   * Whether crossing `banThreshold` may record a ban. Defaults to true.
+   *
+   * `false` is for an identity that must never be banned but still has to be
+   * counted — the loopback peer, which is this host's own co-located
+   * consumers. Their window ceiling is a self-clearing shed; a ban on that
+   * address is an hour-long outage of the whole install.
+   */
+  readonly banOnEscalation?: boolean;
 }
 
 /** What one admission step decided. */
@@ -375,7 +384,8 @@ export class InMemoryIpAbuseStore implements IpAbuseStore {
     );
     banCounter.prune(now - this.windowMs);
     banCounter.push(now);
-    const bannedNow = banCounter.count() >= banThreshold;
+    const bannedNow =
+      attempt.banOnEscalation !== false && banCounter.count() >= banThreshold;
     if (bannedNow) {
       // Bans are keyed by identity alone, so the same bound applies: expired
       // entries are only dropped when their identity is looked up again, which
@@ -429,6 +439,44 @@ export class IpAbuseProtectionService {
     // count can never exceed `maxRequestsPerWindow` without being rejected).
     this.banThreshold = Math.max(opts.banThreshold ?? 1080, this.maxRequestsPerWindow + 1);
     this.banDurationMs = opts.banDurationMs ?? 60 * 60 * 1000;
+  }
+
+  /**
+   * Records the attempt and reports whether the per-window ceiling was crossed,
+   * **without ever escalating to a ban**.
+   *
+   * For an identity that must never be banned — the loopback peer, which is
+   * this host's own co-located consumers — the window ceiling is still the
+   * right shed: it answers 429 for the remainder of a 60-second window and
+   * releases on its own. A ban is not: it has an hour-long deadline, and the
+   * address it names is the only one those consumers have, so escalating takes
+   * the whole install down (measured 2026-11-21: the gateway banned 127.0.0.1
+   * for 60 minutes and every `/v1/*` call answered `ip-banned`).
+   *
+   * Implemented by running the same atomic store step with an unreachable ban
+   * threshold, so the counting semantics stay byte-identical to
+   * {@link checkBeforeAccess} and no second code path can drift from it.
+   */
+  async countOnly(input: {
+    readonly identity: ClientIdentity;
+    readonly route: string;
+    readonly signal?: AbortSignal;
+  }): Promise<boolean> {
+    if (input.signal?.aborted) return false;
+    const outcome = await this.store.checkAndRecord({
+      identity: input.identity.address,
+      route: input.route,
+      now: this.clock(),
+      limit: this.maxRequestsPerWindow,
+      banThreshold: this.banThreshold,
+      banDurationMs: this.banDurationMs,
+      banOnEscalation: false,
+    });
+    if (outcome.count > this.maxRequestsPerWindow) {
+      metrics.cartethyia_ip_abuse_refusals_total.inc(1, { reason: "ip-rate-limited" });
+      return true;
+    }
+    return false;
   }
 
   async checkBeforeAccess(input: {
@@ -576,7 +624,7 @@ const IP_ADMISSION_SCRIPT = `
     redis.call('ZREMRANGEBYRANK', KEYS[2], 0, banCount - tonumber(ARGV[4]))
   end
   local bannedNow = 0
-  if banCount + 1 >= tonumber(ARGV[4]) then
+  if ARGV[8] == '1' and banCount + 1 >= tonumber(ARGV[4]) then
     redis.call('SET', KEYS[3], tonumber(ARGV[1]) + tonumber(ARGV[5]), 'PX', ARGV[5])
     bannedNow = 1
     retryAfterMs = tonumber(ARGV[5])
@@ -617,6 +665,7 @@ export class RedisIpAbuseStore implements IpAbuseStore {
       String(Math.max(1, banDurationMs)),
       `${now}:${crypto.randomUUID()}`,
       `${now}:${crypto.randomUUID()}`,
+      attempt.banOnEscalation === false ? "0" : "1",
     );
     return decodeAbuseOutcome(raw);
   }

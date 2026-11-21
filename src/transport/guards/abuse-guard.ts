@@ -2,10 +2,11 @@
 // ceiling via the root `request` hook.
 import { Elysia } from "elysia";
 import type { TrustedProxyBoundary } from "../../config/network";
-import { resolveClientIdentity } from "../../security/ip-boundary";
+import { isLoopbackAddress, resolveClientIdentity } from "../../security/ip-boundary";
 import type { ProxyRequestStateStore } from "../request/state";
 import { fastPathname } from "../pathname";
 import type { IpAbuseProtectionService } from "../../security/abuse";
+import { GatewayError } from "../../protocol/gateway-error";
 import { peerAddressUnavailableError } from "./guard-errors";
 
 /**
@@ -78,6 +79,38 @@ export function createIpAbuseProtectionMiddleware(deps: {
         address,
         source: address === peer ? "tcp-peer" : "trusted-forwarded-header",
       };
+    }
+    // A loopback identity is this host talking to itself: the co-located
+    // consumers (a local gateway in front, the seller node, the operator's own
+    // tooling) all arrive as 127.0.0.1 and therefore share ONE abuse bucket.
+    // Counting them is right — a runaway local client must not be able to melt
+    // the box — but *banning* that identity takes the whole install down, and
+    // the ban cannot be evaded the way a public one can: there is no other
+    // address to come from. Measured 2026-11-21: an upstream provider's daily
+    // allowance ran out, retries pushed the shared loopback counter past the
+    // escalation ceiling, and the gateway banned itself for an hour — every
+    // `/v1/*` call then answered `ip-banned`, including the operator's.
+    //
+    // So the per-window ceiling still applies (it sheds load without a
+    // deadline), and only the escalation to a ban is skipped. A public client
+    // is unaffected: it arrives with its own address, or with a trusted
+    // forwarded one, and keeps the full ban path.
+    if (isLoopbackAddress(address)) {
+      const overWindow = await deps.ipAbuseProtection.countOnly({
+        identity: {
+          address,
+          source: address === peer ? "tcp-peer" : "trusted-forwarded-header",
+        },
+        route: path,
+        ...(state === undefined ? {} : { signal: state.abortController.signal }),
+      });
+      if (!overWindow) return;
+      throw new GatewayError(
+        "rate_limited",
+        429,
+        "This address is sending requests faster than the abuse limit allows (request {requestId}). Back off and retry after the window rolls over. You've maxed this window — pace yourself ⏳",
+        { reason: "ip-rate-limited", ip: address, route: path },
+      );
     }
     try {
       await deps.ipAbuseProtection.checkBeforeAccess({
