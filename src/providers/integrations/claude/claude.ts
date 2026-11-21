@@ -305,29 +305,40 @@ export class ClaudeAdapter implements ProviderAdapter {
       // breakpoint belongs on that, not on the identity — pinning it here put
       // a breakpoint mid-prefix and left the caller's prompt uncached, which
       // is both a fingerprint delta and a cache miss on every request.
-      const instruction = {
-        type: "text",
-        text: CLAUDE_CODE_SYSTEM_INSTRUCTION,
-      };
       const isBillingBlock = (block: unknown) =>
         isRecord(block) &&
         typeof block["text"] === "string" &&
         (block["text"] as string).startsWith(CLAUDE_BILLING_HEADER_PREFIX);
       const isIdentityBlock = (block: unknown) =>
         isRecord(block) && block["text"] === CLAUDE_CODE_SYSTEM_INSTRUCTION;
-      // The identity must lead, always. Leaving an identity that already
-      // appears in the caller's system blocks where it sits is the bug: a
-      // caller replaying our own previous system array can carry it *after*
-      // its own prompt, so Anthropic read the caller's prompt first, classified
-      // the request as a third-party client, and billed it from extra usage —
-      // a hard 400 when that balance is empty. Hoisting (and de-duplicating)
-      // is what makes the placement unconditional.
-      //
-      // Billing still leads because the CCH patch anchors on `system[0]`.
+      // The caller's system prompt stays ONE text block: the identity is
+      // prefixed into that block's text, not published as a sibling block.
+      // Anthropic reads the system content to classify the client, and a
+      // separate identity block next to a third-party prompt is not the shape
+      // the reference client sends — the identity has to be part of the prompt
+      // text itself, with billing remaining its own leading block because the
+      // CCH patch anchors on `system[0]`.
       const callerBlocks = system.filter(
         (block) => !isBillingBlock(block) && !isIdentityBlock(block),
       );
-      const assembled = [billing, instruction, ...callerBlocks];
+      const promptText = callerBlocks
+        .map((block) => (isRecord(block) && typeof block["text"] === "string" ? block["text"] : ""))
+        .filter((text) => text.length > 0)
+        .join("\n\n");
+      const nonTextBlocks = callerBlocks.filter(
+        (block) => !(isRecord(block) && typeof block["text"] === "string"),
+      );
+      const assembled = [
+        billing,
+        {
+          type: "text",
+          text:
+            promptText.length > 0
+              ? `${CLAUDE_CODE_SYSTEM_INSTRUCTION}\n\n${promptText}`
+              : CLAUDE_CODE_SYSTEM_INSTRUCTION,
+        },
+        ...nonTextBlocks,
+      ];
       // The cache breakpoint rides the last system block: everything before it
       // is stable prefix, and caching the tail is what the reference client
       // does. Billing is never breakpointed — it varies per request.

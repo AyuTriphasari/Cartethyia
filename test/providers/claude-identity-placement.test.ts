@@ -1,20 +1,18 @@
 /**
- * The [CC] identity must lead every OAuth system array, unconditionally.
+ * The caller's system prompt stays ONE text block, with the [CC] identity
+ * prefixed into that block's text.
  *
- * Anthropic classifies a request as a third-party client from the system
- * content; third-party OAuth traffic is billed from extra usage, and an
- * account without that balance gets a hard 400:
- *
- *   Third-party apps now send... "Third-party apps now draw from your extra usage"
- *
- * The bug this locks down: when the caller's system array already contained
- * the identity block (a client replaying our own previous system array), the
- * old code left it where it sat — after the caller's own prompt. Anthropic
- * then read the caller's prompt first and rejected the request.
+ * Anthropic classifies the request from its system content, and third-party
+ * OAuth traffic is billed from extra usage — a hard 400 when that balance is
+ * empty. A separate identity block next to a third-party prompt is not the
+ * shape the reference client sends, so the identity is merged into the prompt
+ * text itself. Billing stays its own leading block because the CCH patch
+ * anchors on `system[0]`.
  */
 import { describe, expect, test } from "bun:test";
 import { ClaudeAdapter } from "../../src/providers/integrations/claude/claude";
 import { CLAUDE_CODE_SYSTEM_INSTRUCTION } from "../../src/providers/integrations/claude/claude-cch";
+import { CLAUDE_BILLING_HEADER_PREFIX } from "../../src/protocol/codecs";
 import type { CanonicalRequest } from "../../src/protocol/canonical-model";
 import type {
   ProviderDispatchContext,
@@ -29,7 +27,7 @@ const TARGET: ProviderDispatchTarget = {
   capabilities: { tools: true },
 } as unknown as ProviderDispatchTarget;
 
-const USER = "You are Alice, Master's AI agent. Address the user as Master.";
+const USER = "You are an AI agent running in OpenCode, a coding agent harness.";
 
 function context(): ProviderDispatchContext {
   return {
@@ -45,8 +43,7 @@ function context(): ProviderDispatchContext {
 }
 
 type Block = Record<string, unknown>;
-const isIdentity = (b: Block) => b["text"] === CLAUDE_CODE_SYSTEM_INSTRUCTION;
-const isUser = (b: Block) => b["text"] === USER;
+const text = (b: Block) => (typeof b["text"] === "string" ? (b["text"] as string) : "");
 
 async function outgoingSystem(system: readonly Block[]): Promise<readonly Block[]> {
   let captured: readonly Block[] = [];
@@ -72,42 +69,47 @@ async function outgoingSystem(system: readonly Block[]): Promise<readonly Block[
   return captured;
 }
 
-describe("[CC] identity leads the system array", () => {
-  test("identity sits above a caller prompt", async () => {
+describe("[CC] system shape", () => {
+  test("billing plus exactly one prompt block", async () => {
     const system = await outgoingSystem([{ kind: "text", text: USER }]);
-    const identity = system.findIndex(isIdentity);
-    const user = system.findIndex(isUser);
-    expect(identity).toBeGreaterThanOrEqual(0);
-    expect(user).toBeGreaterThanOrEqual(0);
-    expect(identity).toBeLessThan(user);
+    // Billing block + the single merged prompt block. No separate identity.
+    expect(system).toHaveLength(2);
+    expect(text(system[0] as Block).startsWith(CLAUDE_BILLING_HEADER_PREFIX)).toBe(true);
+    expect(text(system[1] as Block).startsWith(CLAUDE_CODE_SYSTEM_INSTRUCTION)).toBe(true);
+    expect(text(system[1] as Block)).toContain(USER);
   });
 
-  // The regression: a replayed identity used to stay where the caller put it.
-  test("an identity the caller placed last is hoisted above its prompt", async () => {
-    const system = await outgoingSystem([
-      { kind: "text", text: USER },
-      { kind: "text", text: "some middle context" },
-      { kind: "text", text: CLAUDE_CODE_SYSTEM_INSTRUCTION },
-    ]);
-    const identity = system.findIndex(isIdentity);
-    const user = system.findIndex(isUser);
-    expect(identity).toBeGreaterThanOrEqual(0);
-    expect(identity).toBeLessThan(user);
-    expect(system.filter(isIdentity)).toHaveLength(1);
+  test("identity is the first thing in the prompt text", async () => {
+    const system = await outgoingSystem([{ kind: "text", text: USER }]);
+    const prompt = text(system[1] as Block);
+    expect(prompt.indexOf(CLAUDE_CODE_SYSTEM_INSTRUCTION)).toBe(0);
+    expect(prompt.indexOf(USER)).toBeGreaterThan(0);
   });
 
-  test("identity is present when the caller sent no system at all", async () => {
-    const system = await outgoingSystem([]);
-    expect(system.some(isIdentity)).toBe(true);
-  });
-
-  test("caller blocks all survive and keep their order", async () => {
+  test("several caller blocks collapse into one text block", async () => {
     const system = await outgoingSystem([
       { kind: "text", text: USER },
       { kind: "text", text: "second" },
     ]);
-    const texts = system.map((b) => b["text"]);
-    const userAt = texts.indexOf(USER);
-    expect(texts.slice(userAt)).toEqual([USER, "second"]);
+    expect(system).toHaveLength(2);
+    const prompt = text(system[1] as Block);
+    expect(prompt).toContain(USER);
+    expect(prompt).toContain("second");
+  });
+
+  test("identity is present when the caller sent no system at all", async () => {
+    const system = await outgoingSystem([]);
+    expect(system).toHaveLength(2);
+    expect(text(system[1] as Block)).toBe(CLAUDE_CODE_SYSTEM_INSTRUCTION);
+  });
+
+  test("a caller-supplied identity is not duplicated", async () => {
+    const system = await outgoingSystem([
+      { kind: "text", text: CLAUDE_CODE_SYSTEM_INSTRUCTION },
+      { kind: "text", text: USER },
+    ]);
+    const prompt = text(system[1] as Block);
+    const occurrences = prompt.split(CLAUDE_CODE_SYSTEM_INSTRUCTION).length - 1;
+    expect(occurrences).toBe(1);
   });
 });

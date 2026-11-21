@@ -123,17 +123,22 @@ describe("Claude Code system block assembly", () => {
     expect(system[0]?.cache_control).toBeUndefined();
   });
 
-  test("the identity block is not breakpointed when the caller supplies system", async () => {
+  test("the identity is merged into the prompt block, not its own block", async () => {
     const system = await dispatchedSystem("Stay concise.");
-    const identity = system.find((block) => block.text === CLAUDE_CODE_SYSTEM_INSTRUCTION);
-    expect(identity).toBeDefined();
-    expect(identity?.cache_control).toBeUndefined();
+    // Billing + one merged prompt block: no separate identity block.
+    expect(system).toHaveLength(2);
+    const separate = system.filter((block) => block.text === CLAUDE_CODE_SYSTEM_INSTRUCTION);
+    expect(separate).toHaveLength(0);
+    const merged = system[1];
+    expect(merged?.text?.startsWith(CLAUDE_CODE_SYSTEM_INSTRUCTION)).toBe(true);
+    expect(merged?.text).toContain("Stay concise.");
   });
 
-  test("the breakpoint rides the last system block", async () => {
+  test("the breakpoint rides the merged prompt block", async () => {
     const system = await dispatchedSystem("Stay concise.");
     const last = system[system.length - 1];
-    expect(last?.text).toBe("Stay concise.");
+    expect(last?.text?.startsWith(CLAUDE_CODE_SYSTEM_INSTRUCTION)).toBe(true);
+    expect(last?.text).toContain("Stay concise.");
     expect(last?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
   });
 
