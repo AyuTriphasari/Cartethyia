@@ -196,6 +196,16 @@ function standardClaudeHeaders(
   const inboundUserAgent = safeHeaderValue(
     headerValue(options.request_headers, "user-agent"),
   );
+  // Only a real [CC] User-Agent may travel through. A caller that is not
+  // [CC] (OpenCode, Cline, a curl script) sends its own product name, and
+  // forwarding it made Anthropic classify the request as a third-party client
+  // regardless of the identity system block — third-party OAuth traffic is
+  // billed from extra usage and 400s when that balance is empty. A genuine
+  // `claude-cli/...` value is still honoured so the version stays faithful.
+  const claudeUserAgent =
+    inboundUserAgent !== undefined && /^claude-cli\//i.test(inboundUserAgent)
+      ? inboundUserAgent
+      : undefined;
   const inboundSessionId = safeHeaderValue(
     options.session_id ??
       headerValue(options.request_headers, "x-claude-code-session-id"),
@@ -210,7 +220,7 @@ function standardClaudeHeaders(
   const headers: Record<string, string> = {
     Accept: acceptHeader,
     "Content-Type": "application/json",
-    "User-Agent": inboundUserAgent ?? `claude-cli/${options.cli_version ?? CLAUDE_CODE_VERSION} (external, cli)`,
+    "User-Agent": claudeUserAgent ?? `claude-cli/${options.cli_version ?? CLAUDE_CODE_VERSION} (external, cli)`,
     ...(inboundSessionId === undefined
       ? {}
       : { "X-Claude-Code-Session-Id": inboundSessionId }),
