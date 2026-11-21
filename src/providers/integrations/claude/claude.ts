@@ -309,22 +309,25 @@ export class ClaudeAdapter implements ProviderAdapter {
         type: "text",
         text: CLAUDE_CODE_SYSTEM_INSTRUCTION,
       };
-      const hasInstruction = system.some(
-        (block) => isRecord(block) && block["text"] === CLAUDE_CODE_SYSTEM_INSTRUCTION,
+      const isBillingBlock = (block: unknown) =>
+        isRecord(block) &&
+        typeof block["text"] === "string" &&
+        (block["text"] as string).startsWith(CLAUDE_BILLING_HEADER_PREFIX);
+      const isIdentityBlock = (block: unknown) =>
+        isRecord(block) && block["text"] === CLAUDE_CODE_SYSTEM_INSTRUCTION;
+      // The identity must lead, always. Leaving an identity that already
+      // appears in the caller's system blocks where it sits is the bug: a
+      // caller replaying our own previous system array can carry it *after*
+      // its own prompt, so Anthropic read the caller's prompt first, classified
+      // the request as a third-party client, and billed it from extra usage —
+      // a hard 400 when that balance is empty. Hoisting (and de-duplicating)
+      // is what makes the placement unconditional.
+      //
+      // Billing still leads because the CCH patch anchors on `system[0]`.
+      const callerBlocks = system.filter(
+        (block) => !isBillingBlock(block) && !isIdentityBlock(block),
       );
-      const hasBilling = system.some(
-        (block) =>
-          isRecord(block) &&
-          typeof block["text"] === "string" &&
-          (block["text"] as string).startsWith(CLAUDE_BILLING_HEADER_PREFIX),
-      );
-      // Captured-client placement: billing first, instruction second. The
-      // patch anchor assumes this order — never reorder around it.
-      const assembled = [
-        ...(hasBilling ? [] : [billing]),
-        ...(hasInstruction ? [] : [instruction]),
-        ...system,
-      ];
+      const assembled = [billing, instruction, ...callerBlocks];
       // The cache breakpoint rides the last system block: everything before it
       // is stable prefix, and caching the tail is what the reference client
       // does. Billing is never breakpointed — it varies per request.
